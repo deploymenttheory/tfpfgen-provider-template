@@ -152,25 +152,44 @@ jobs:
           ARGS=(-openapi-dir "${OPENAPI_DIR}" -out internal/sdk -client-name "${CLIENT_NAME}" -clean)
           [ -n "${INCLUDE}" ] && ARGS+=(-include "${INCLUDE}")
           [ -n "${EXCLUDE}" ] && ARGS+=(-exclude "${EXCLUDE}")
-          tfpfgen sdk generate "${ARGS[@]}"
+          # The postcheck builds the generated tree, and a new document version
+          # can import modules go.mod does not yet require. The files are
+          # already written when the postcheck refuses, so tidy against them
+          # and regenerate -- the second run proves the tree builds clean.
+          if ! tfpfgen sdk generate "${ARGS[@]}"; then
+            echo "postcheck refused; tidying the module against the generated tree and retrying"
+            go mod tidy
+            tfpfgen sdk generate "${ARGS[@]}"
+          fi
 
       - name: Draft blueprints
         env:
           DIALECT: ${{ inputs.sdk_dialect }}
         run: |
           mkdir -p "${BLUEPRINT_DIR}"
-          tfpfgen blueprint draft -openapi-dir "${OPENAPI_DIR}" -sdk-dialect "${DIALECT}" -out "${BLUEPRINT_DIR}"
+          ARGS=(-openapi-dir "${OPENAPI_DIR}" -sdk-dialect "${DIALECT}" -out "${BLUEPRINT_DIR}")
+          if [ "${DIALECT}" = "kiotaFluent" ]; then
+            # The drafted bindings must name where the generated models live,
+            # which for an embedded SDK is the module path plus its directory.
+            ARGS+=(-sdk-models-package "$(go list -m)/internal/sdk/models")
+          fi
+          tfpfgen blueprint draft "${ARGS[@]}"
 
       - name: Generate the provider (curated blueprints only)
         run: |
-          if ls "${BLUEPRINT_DIR}"/*/*.blueprint.json >/dev/null 2>&1 || ls "${BLUEPRINT_DIR}"/*.blueprint.json >/dev/null 2>&1; then
+          # Drafted resource blueprints arrive under their canonical names, so
+          # the readiness signal is the one file drafting never writes: the
+          # hand-authored provider block (provider.blueprint.json). Without it
+          # the drafts are proposals, and the run stops at proposing them.
+          if [ -f "${BLUEPRINT_DIR}/provider.blueprint.json" ]; then
             tfpfgen bindings check -blueprint "${BLUEPRINT_DIR}" -module .
             tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out .
             go mod tidy
             go build ./...
             go test ./... || true
           else
-            echo "no promoted blueprints yet -- the drafts in ${BLUEPRINT_DIR} are waiting for curation"
+            echo "no provider block yet -- the drafted blueprints in ${BLUEPRINT_DIR} await curation"
+            echo "author ${BLUEPRINT_DIR}/provider.blueprint.json (name, goModule, sdk) to unlock provider generation"
             go mod tidy || true
           fi
 
@@ -189,9 +208,9 @@ jobs:
           git checkout -B "$BRANCH"
           git add -A
           git commit -m "Generate ${PROVIDER_NAME} from the pinned OpenAPI document" \
-            -m "tfpfgen pipeline run ${GITHUB_RUN_ID}. Generated content follows from the pinned snapshot and committed blueprints; drafts (*.draft.json) are proposals awaiting curation."
+            -m "tfpfgen pipeline run ${GITHUB_RUN_ID}. Generated content follows from the pinned snapshot and committed blueprints; drafted blueprints are proposals awaiting curation."
           git push --force origin "HEAD:$BRANCH"
-          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- Snapshot: `%s`\n- Blueprints: `%s` (`*.draft.json` files are drafts awaiting curation)\n- SDK dialect: `%s`\n\nReview, curate the drafts, and merge what should stand.' \
+          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- Snapshot: `%s`\n- Blueprints: `%s` (drafted; awaiting curation and a hand-authored provider block)\n- SDK dialect: `%s`\n\nReview, curate the drafts, and merge what should stand.' \
             "${GITHUB_RUN_ID}" "${OPENAPI_DIR}" "${BLUEPRINT_DIR}" "${SDK_DIALECT}")
           gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
             --title "tfpfgen: generate ${PROVIDER_NAME} from the pinned OpenAPI document" \

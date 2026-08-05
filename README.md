@@ -19,14 +19,16 @@ curated — regenerates the provider in place.
      re-fetch from the pinned source)
 
    The run opens a pull request holding the pinned snapshot
-   (`openapi/<name>/`), the generated SDK (`internal/sdk/`), and draft
-   blueprints (`blueprints/<name>/*.draft.json`). It also claims the Go module
+   (`openapi/<name>/`), the generated SDK (`internal/sdk/`), and drafted
+   resource blueprints (`blueprints/<name>/`). It also claims the Go module
    path from the repository name on the first run.
-3. **Curate.** Drafts are proposals: probe the live API with
+3. **Curate.** Drafted blueprints are proposals: probe the live API with
    `tfpfgen probe record`, fold the evidence in with `tfpfgen blueprint merge`,
-   promote drafts to `*.blueprint.json`, and commit. From then on every
-   pipeline run regenerates the provider from the curated blueprints —
-   `bindings check`, `provider generate`, build and tests.
+   author the provider block (`blueprints/<name>/provider.blueprint.json` —
+   the one file drafting never writes, and the pipeline's readiness signal),
+   and commit. From then on every pipeline run regenerates the provider from
+   the curated blueprints — `bindings check`, `provider generate`, build and
+   tests.
 4. **Release.** Push a `v*` tag (or dispatch `provider | Terraform Provider
    Release`). goreleaser builds linux/darwin/windows on amd64/arm64, with the
    signed checksums and registry manifest the Terraform Registry requires.
@@ -50,7 +52,7 @@ anonymously. If your document needs credentials, pin it locally with
 | `openapi/<name>/` | pipeline | `tfpfgen openapi fetch` — pinned, checksummed snapshots |
 | `openapi/<name>/patches/` | you | document patches: curated, evidence-justified corrections |
 | `internal/sdk/` | pipeline | `tfpfgen sdk generate` — the embedded Kiota SDK |
-| `blueprints/<name>/` | you | curated blueprints (drafts arrive as `*.draft.json`) |
+| `blueprints/<name>/` | you | curated blueprints (drafted by the pipeline, curated by you; the provider block is always hand-authored) |
 | everything `provider generate` emits | pipeline | regenerated on every run; edit blueprints, not output |
 | `go.mod`, `main.go`, scaffolds | you | generated once (or shipped here), then yours |
 
