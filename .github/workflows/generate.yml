@@ -120,6 +120,13 @@ jobs:
             echo "module path set to github.com/${GITHUB_REPOSITORY}"
           fi
 
+      - name: Prime the Go module graph
+        # The template ships go.mod without a go.sum -- there is no code yet to
+        # derive one from -- and the SDK postcheck builds the generated tree,
+        # which refuses without recorded checksums. Downloading the declared
+        # module graph writes them.
+        run: go mod download all
+
       - name: Pin the OpenAPI document
         env:
           OPENAPI_URL: ${{ inputs.openapi_url }}
