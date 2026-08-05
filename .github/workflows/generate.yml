@@ -14,8 +14,8 @@ on:
   workflow_dispatch:
     inputs:
       provider_name:
-        description: 'Provider name, e.g. thousandeyes. Names openapi/<name> and blueprints/<name>.'
-        required: true
+        description: 'Provider name. Defaults to the repository name minus terraform-provider-. Names openapi/<name> and blueprints/<name>.'
+        required: false
         type: string
       openapi_url:
         description: 'OpenAPI document URL. Required on the first run; omit later to re-fetch from the pinned source.'
@@ -50,6 +50,11 @@ on:
         required: false
         default: '1.34.1'
         type: string
+      draft_blueprints:
+        description: 'Draft blueprints even when a curated set exists (drafting overwrites files that share a name; review the diff with care).'
+        required: false
+        default: false
+        type: boolean
       kiota_sha256:
         description: 'sha256 of the kiota linux-x64 release zip. Verified when set; the run prints the computed digest either way, so pin it from the first run''s log.'
         required: false
@@ -68,10 +73,6 @@ jobs:
     name: '⚙️ Generate from the OpenAPI document'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      PROVIDER_NAME: ${{ inputs.provider_name }}
-      OPENAPI_DIR: openapi/${{ inputs.provider_name }}
-      BLUEPRINT_DIR: blueprints/${{ inputs.provider_name }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
@@ -80,6 +81,18 @@ jobs:
 
       - name: Check Out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the provider name
+        env:
+          INPUT_NAME: ${{ inputs.provider_name }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          NAME="${INPUT_NAME:-${REPO_NAME#terraform-provider-}}"
+          {
+            echo "PROVIDER_NAME=${NAME}"
+            echo "OPENAPI_DIR=openapi/${NAME}"
+            echo "BLUEPRINT_DIR=blueprints/${NAME}"
+          } >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -173,7 +186,15 @@ jobs:
       - name: Draft blueprints
         env:
           DIALECT: ${{ inputs.sdk_dialect }}
+          FORCE_DRAFT: ${{ inputs.draft_blueprints }}
         run: |
+          # Drafting writes canonical names, so on a curated set it would
+          # overwrite files a human owns. Once the provider block exists,
+          # drafting only runs when asked for explicitly.
+          if [ -f "${BLUEPRINT_DIR}/provider.blueprint.json" ] && [ "${FORCE_DRAFT}" != "true" ]; then
+            echo "curated blueprints present; skipping drafting (set draft_blueprints=true to draft alongside them)"
+            exit 0
+          fi
           mkdir -p "${BLUEPRINT_DIR}"
           ARGS=(-openapi-dir "${OPENAPI_DIR}" -sdk-dialect "${DIALECT}" -out "${BLUEPRINT_DIR}")
           if [ "${DIALECT}" = "kiotaFluent" ]; then
@@ -183,23 +204,35 @@ jobs:
           fi
           tfpfgen blueprint draft "${ARGS[@]}"
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # 4.0.1
+        with:
+          terraform_version: '1.12.1'
+          terraform_wrapper: false
+
       - name: Generate the provider (curated blueprints only)
         run: |
-          # Drafted resource blueprints arrive under their canonical names, so
-          # the readiness signal is the one file drafting never writes: the
-          # hand-authored provider block (provider.blueprint.json). Without it
-          # the drafts are proposals, and the run stops at proposing them.
-          if [ -f "${BLUEPRINT_DIR}/provider.blueprint.json" ]; then
-            tfpfgen bindings check -blueprint "${BLUEPRINT_DIR}" -module .
-            tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out .
-            go mod tidy
-            go build ./...
-            go test ./... || true
-          else
+          # The readiness signal is the one file drafting never writes: the
+          # hand-authored provider block. Without it the drafts are proposals,
+          # and the run stops at proposing them.
+          if [ ! -f "${BLUEPRINT_DIR}/provider.blueprint.json" ]; then
             echo "no provider block yet -- the drafted blueprints in ${BLUEPRINT_DIR} await curation"
             echo "author ${BLUEPRINT_DIR}/provider.blueprint.json (name, goModule, sdk) to unlock provider generation"
             go mod tidy || true
+            exit 0
           fi
+          tfpfgen bindings check -blueprint "${BLUEPRINT_DIR}" -module .
+          # The postcheck builds the tree; generation can introduce imports
+          # go.mod does not yet require, so tidy against the written files and
+          # regenerate -- the second run proves the tree builds clean.
+          if ! tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out .; then
+            echo "postcheck refused; tidying the module against the generated tree and retrying"
+            go mod tidy
+            tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out .
+          fi
+          go mod tidy
+          go build ./...
+          go test ./...
 
       - name: Open a pull request with the results
         env:
@@ -220,7 +253,7 @@ jobs:
           git commit -m "Generate ${PROVIDER_NAME} from OpenAPI ${OPENAPI_VERSION}" \
             -m "tfpfgen pipeline run ${GITHUB_RUN_ID} against snapshot ${SNAPSHOT_NAME}. Generated content follows from the pinned snapshot and committed blueprints; drafted blueprints are proposals awaiting curation."
           git push --force origin "HEAD:$BRANCH"
-          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- OpenAPI document: version `%s`, snapshot `%s`\n- Blueprints: `%s` (drafted; awaiting curation and a hand-authored provider block)\n- SDK dialect: `%s`\n\nThis branch is generator-owned and force-pushed on rerun. Review, curate the drafts, and merge what should stand.' \
+          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- OpenAPI document: version `%s`, snapshot `%s`\n- Blueprints: `%s` (drafted; awaiting curation and a hand-authored provider block)\n- SDK dialect: `%s`\n\nOne run, one pull request: document, SDK, blueprints (drafted when uncurated) and -- once the curated provider block exists -- the generated provider, built and tested on the runner. This branch is generator-owned and force-pushed on rerun.' \
             "${GITHUB_RUN_ID}" "${OPENAPI_VERSION}" "${SNAPSHOT_NAME}" "${BLUEPRINT_DIR}" "${SDK_DIALECT}")
           gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
             --title "tfpfgen: generate ${PROVIDER_NAME} from OpenAPI ${OPENAPI_VERSION}" \
