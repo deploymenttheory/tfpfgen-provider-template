@@ -1,0 +1,192 @@
+# The tfpfgen pipeline, parameterised. Point it at an OpenAPI document and it
+# pins a snapshot, generates the SDK, drafts blueprints, and -- once you have
+# curated blueprints -- regenerates the provider in place. Every run lands as
+# a pull request; nothing is committed to the default branch directly.
+#
+# The pipeline is honest about what a generator can and cannot do: the first
+# run produces a pinned snapshot, an SDK and *draft* blueprints
+# (*.draft.json). Drafts are curated by hand -- probed, promoted, and only
+# then does `provider generate` accept them. Later runs regenerate everything
+# that follows from the committed inputs.
+name: tfpfgen | Generate
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_name:
+        description: 'Provider name, e.g. thousandeyes. Names openapi/<name> and blueprints/<name>.'
+        required: true
+        type: string
+      openapi_url:
+        description: 'OpenAPI document URL. Required on the first run; omit later to re-fetch from the pinned source.'
+        required: false
+        type: string
+      sdk_dialect:
+        description: 'SDK dialect for drafted bindings.'
+        required: true
+        type: choice
+        default: kiotaFluent
+        options: [kiotaFluent, restyService]
+      sdk_client_name:
+        description: 'Root client type name (kiota -c).'
+        required: false
+        default: ApiClient
+        type: string
+      sdk_include:
+        description: 'Restrict the SDK to these API path globs, e.g. /tags,/tags/** (comma-separated).'
+        required: false
+        type: string
+      sdk_exclude:
+        description: 'Drop these API path globs from the SDK (comma-separated).'
+        required: false
+        type: string
+      tfpfgen_ref:
+        description: 'tfpfgen version to install (a tag, branch or commit of terraform-plugin-framework-codegen).'
+        required: false
+        default: main
+        type: string
+      kiota_version:
+        description: 'kiota release to install. Must match the committed kiota-lock.json once one exists.'
+        required: false
+        default: '1.34.1'
+        type: string
+      kiota_sha256:
+        description: 'sha256 of the kiota linux-x64 release zip. Verified when set; the run prints the computed digest either way, so pin it from the first run''s log.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: tfpfgen-generate-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    name: '⚙️ Generate from the OpenAPI document'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PROVIDER_NAME: ${{ inputs.provider_name }}
+      OPENAPI_DIR: openapi/${{ inputs.provider_name }}
+      BLUEPRINT_DIR: blueprints/${{ inputs.provider_name }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          REF: ${{ inputs.tfpfgen_ref }}
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${REF}"
+          tfpfgen version
+
+      - name: Install kiota
+        if: inputs.sdk_dialect == 'kiotaFluent'
+        env:
+          KIOTA_VERSION: ${{ inputs.kiota_version }}
+          KIOTA_SHA256: ${{ inputs.kiota_sha256 }}
+        run: |
+          curl -sL -o /tmp/kiota.zip \
+            "https://github.com/microsoft/kiota/releases/download/v${KIOTA_VERSION}/linux-x64.zip"
+          DIGEST=$(sha256sum /tmp/kiota.zip | cut -d' ' -f1)
+          echo "kiota v${KIOTA_VERSION} linux-x64 sha256: ${DIGEST}"
+          if [ -n "${KIOTA_SHA256}" ] && [ "${DIGEST}" != "${KIOTA_SHA256}" ]; then
+            echo "::error::kiota zip digest ${DIGEST} does not match the pinned ${KIOTA_SHA256}"
+            exit 1
+          fi
+          mkdir -p "$HOME/kiota"
+          unzip -q /tmp/kiota.zip -d "$HOME/kiota"
+          chmod +x "$HOME/kiota/kiota"
+          echo "$HOME/kiota" >> "$GITHUB_PATH"
+
+      - name: Claim the module path (first run only)
+        run: |
+          if grep -q "terraform-provider-REPLACE_ME" go.mod; then
+            go mod edit -module "github.com/${GITHUB_REPOSITORY}"
+            echo "module path set to github.com/${GITHUB_REPOSITORY}"
+          fi
+
+      - name: Pin the OpenAPI document
+        env:
+          OPENAPI_URL: ${{ inputs.openapi_url }}
+        run: |
+          if [ -n "${OPENAPI_URL}" ]; then
+            tfpfgen openapi fetch -url "${OPENAPI_URL}" -out "${OPENAPI_DIR}"
+          elif [ -d "${OPENAPI_DIR}" ]; then
+            # Re-fetch from the source the latest snapshot records; identical
+            # upstream content pins nothing and the run continues quietly.
+            tfpfgen openapi fetch -out "${OPENAPI_DIR}"
+          else
+            echo "::error::no pinned snapshot exists yet -- provide openapi_url on the first run"
+            exit 1
+          fi
+
+      - name: Generate the SDK
+        if: inputs.sdk_dialect == 'kiotaFluent'
+        env:
+          CLIENT_NAME: ${{ inputs.sdk_client_name }}
+          INCLUDE: ${{ inputs.sdk_include }}
+          EXCLUDE: ${{ inputs.sdk_exclude }}
+        run: |
+          ARGS=(-openapi-dir "${OPENAPI_DIR}" -out internal/sdk -client-name "${CLIENT_NAME}" -clean)
+          [ -n "${INCLUDE}" ] && ARGS+=(-include "${INCLUDE}")
+          [ -n "${EXCLUDE}" ] && ARGS+=(-exclude "${EXCLUDE}")
+          tfpfgen sdk generate "${ARGS[@]}"
+
+      - name: Draft blueprints
+        env:
+          DIALECT: ${{ inputs.sdk_dialect }}
+        run: |
+          mkdir -p "${BLUEPRINT_DIR}"
+          tfpfgen blueprint draft -openapi-dir "${OPENAPI_DIR}" -sdk-dialect "${DIALECT}" -out "${BLUEPRINT_DIR}"
+
+      - name: Generate the provider (curated blueprints only)
+        run: |
+          if ls "${BLUEPRINT_DIR}"/*/*.blueprint.json >/dev/null 2>&1 || ls "${BLUEPRINT_DIR}"/*.blueprint.json >/dev/null 2>&1; then
+            tfpfgen bindings check -blueprint "${BLUEPRINT_DIR}" -module .
+            tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out .
+            go mod tidy
+            go build ./...
+            go test ./... || true
+          else
+            echo "no promoted blueprints yet -- the drafts in ${BLUEPRINT_DIR} are waiting for curation"
+            go mod tidy || true
+          fi
+
+      - name: Open a pull request with the results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SDK_DIALECT: ${{ inputs.sdk_dialect }}
+        run: |
+          if [[ -z $(git status --porcelain) ]]; then
+            echo "✅ everything already matches the pinned inputs; nothing to propose"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="tfpfgen/pipeline-${GITHUB_RUN_ID}"
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "Generate ${PROVIDER_NAME} from the pinned OpenAPI document" \
+            -m "tfpfgen pipeline run ${GITHUB_RUN_ID}. Generated content follows from the pinned snapshot and committed blueprints; drafts (*.draft.json) are proposals awaiting curation."
+          git push --force origin "HEAD:$BRANCH"
+          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- Snapshot: `%s`\n- Blueprints: `%s` (`*.draft.json` files are drafts awaiting curation)\n- SDK dialect: `%s`\n\nReview, curate the drafts, and merge what should stand.' \
+            "${GITHUB_RUN_ID}" "${OPENAPI_DIR}" "${BLUEPRINT_DIR}" "${SDK_DIALECT}")
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
+            --title "tfpfgen: generate ${PROVIDER_NAME} from the pinned OpenAPI document" \
+            --body "$BODY" \
+            || echo "PR already open for $BRANCH"

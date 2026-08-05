@@ -1,0 +1,70 @@
+# Adapted from deploymenttheory/terraform-provider-microsoft365: regenerates
+# registry documentation from the provider schema and opens a PR when it
+# drifted. The provider name is taken from the repository name, which the
+# Terraform conventions require to be terraform-provider-<name>.
+name: provider | Generate Docs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly on Sunday at 3 AM UTC.
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  provider-docs:
+    name: '📚 Generate TF Provider Docs'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache-dependency-path: 'go.sum'
+          cache: true
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # 4.0.1
+        with:
+          terraform_version: '1.12.1'
+          terraform_wrapper: true
+
+      - name: Format Terraform files
+        run: find . -type f -name "*.tf" -exec terraform fmt {} \;
+
+      - name: Generate tf docs
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          PROVIDER_NAME="${REPO_NAME#terraform-provider-}"
+          go generate . || go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate \
+            --provider-name "$PROVIDER_NAME"
+
+      - name: Open a PR when the docs drifted
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -z $(git status --porcelain) ]]; then
+            echo "docs are current"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="docs/regenerate-$(date -u +%Y%m%d)"
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "docs: regenerate provider documentation"
+          git push --force origin "HEAD:$BRANCH"
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
+            --title "docs: regenerate provider documentation" \
+            --body "Automated regeneration: the committed docs drifted from the provider schema." \
+            || echo "PR already open for $BRANCH"
