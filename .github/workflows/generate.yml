@@ -141,6 +141,14 @@ jobs:
             echo "::error::no pinned snapshot exists yet -- provide openapi_url on the first run"
             exit 1
           fi
+          # Name the document version the rest of the run speaks about: the
+          # newest snapshot by its own fetchedAt, not directory order.
+          META=$(for f in "${OPENAPI_DIR}"/*/metadata.json; do
+            printf '%s %s\n' "$(jq -r .fetchedAt "$f")" "$f"; done | sort | tail -1 | cut -d' ' -f2-)
+          {
+            echo "OPENAPI_VERSION=$(jq -r .version "$META")"
+            echo "SNAPSHOT_NAME=$(basename "$(dirname "$META")")"
+          } >> "$GITHUB_ENV"
 
       - name: Generate the SDK
         if: inputs.sdk_dialect == 'kiotaFluent'
@@ -204,15 +212,18 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          BRANCH="tfpfgen/pipeline-${GITHUB_RUN_ID}"
+          # One branch per provider, force-pushed: a rerun updates the open
+          # pull request instead of minting a sibling per run id.
+          BRANCH="tfpfgen/generate-${PROVIDER_NAME}"
           git checkout -B "$BRANCH"
           git add -A
-          git commit -m "Generate ${PROVIDER_NAME} from the pinned OpenAPI document" \
-            -m "tfpfgen pipeline run ${GITHUB_RUN_ID}. Generated content follows from the pinned snapshot and committed blueprints; drafted blueprints are proposals awaiting curation."
+          git commit -m "Generate ${PROVIDER_NAME} from OpenAPI ${OPENAPI_VERSION}" \
+            -m "tfpfgen pipeline run ${GITHUB_RUN_ID} against snapshot ${SNAPSHOT_NAME}. Generated content follows from the pinned snapshot and committed blueprints; drafted blueprints are proposals awaiting curation."
           git push --force origin "HEAD:$BRANCH"
-          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- Snapshot: `%s`\n- Blueprints: `%s` (drafted; awaiting curation and a hand-authored provider block)\n- SDK dialect: `%s`\n\nReview, curate the drafts, and merge what should stand.' \
-            "${GITHUB_RUN_ID}" "${OPENAPI_DIR}" "${BLUEPRINT_DIR}" "${SDK_DIALECT}")
+          BODY=$(printf 'Automated run of the tfpfgen pipeline (run %s).\n\n- OpenAPI document: version `%s`, snapshot `%s`\n- Blueprints: `%s` (drafted; awaiting curation and a hand-authored provider block)\n- SDK dialect: `%s`\n\nThis branch is generator-owned and force-pushed on rerun. Review, curate the drafts, and merge what should stand.' \
+            "${GITHUB_RUN_ID}" "${OPENAPI_VERSION}" "${SNAPSHOT_NAME}" "${BLUEPRINT_DIR}" "${SDK_DIALECT}")
           gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
-            --title "tfpfgen: generate ${PROVIDER_NAME} from the pinned OpenAPI document" \
+            --title "tfpfgen: generate ${PROVIDER_NAME} from OpenAPI ${OPENAPI_VERSION}" \
             --body "$BODY" \
-            || echo "PR already open for $BRANCH"
+            || { echo "PR already open for $BRANCH; refreshing its title and body"
+                 gh pr edit "$BRANCH" --title "tfpfgen: generate ${PROVIDER_NAME} from OpenAPI ${OPENAPI_VERSION}" --body "$BODY"; }
