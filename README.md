@@ -14,9 +14,11 @@ curated — regenerates the provider in place.
    the repository name.
 2. **Run the `tfpfgen | Generate` workflow** (Actions → tfpfgen | Generate →
    Run workflow) with at least:
-   - `provider_name` — e.g. `thousandeyes`
    - `openapi_url` — the OpenAPI document to pin (first run only; later runs
      re-fetch from the pinned source)
+
+   The provider name defaults to the repository name minus
+   `terraform-provider-`; pass `provider_name` only to override it.
 
    The run opens a pull request holding the pinned snapshot
    (`openapi/<name>/`), the generated SDK (`internal/sdk/`), and drafted
@@ -26,9 +28,11 @@ curated — regenerates the provider in place.
    `tfpfgen probe record`, fold the evidence in with `tfpfgen blueprint merge`,
    author the provider block (`blueprints/<name>/provider.blueprint.json` —
    the one file drafting never writes, and the pipeline's readiness signal),
-   and commit. From then on every pipeline run regenerates the provider from
-   the curated blueprints — `bindings check`, `provider generate`, build and
-   tests.
+   and commit. From then on the same run does the whole chain — `bindings
+   check`, `provider generate`, build and tests on the runner — landing as
+   one pull request. Drafting stops once curation exists (it writes canonical
+   names and would overwrite curated files); set `draft_blueprints=true` to
+   draft alongside a curated set deliberately.
 4. **Release.** Push a `v*` tag (or dispatch `provider | Terraform Provider
    Release`). goreleaser builds linux/darwin/windows on amd64/arm64, with the
    signed checksums and registry manifest the Terraform Registry requires.
