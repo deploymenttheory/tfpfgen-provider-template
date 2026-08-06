@@ -21,16 +21,16 @@ on:
   workflow_dispatch:
     inputs:
       resource:
-        description: 'Probe one resource by blueprint key; omit to run every resource that has a scenario.'
+        description: 'Leave empty to probe everything ready to be probed. Or name one resource to do just that one -- use its blueprint file name without the extension, e.g. tag.'
         required: false
         type: string
       force:
-        description: 'Record over recordings that are already committed.'
+        description: 'Re-record resources that already have recordings. Off by default, so a normal run only fills gaps and leaves existing evidence alone.'
         required: false
         default: false
         type: boolean
       tfpfgen_ref:
-        description: 'tfpfgen version to install.'
+        description: 'Which version of the generator to use. Leave as "main" unless you are testing an unreleased change to it.'
         required: false
         default: main
         type: string
