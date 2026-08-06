@@ -57,3 +57,6 @@ __pycache__/
 # AI instructions
 .claude
 .cursor
+# Sandbox profiles carry tenant identifiers and are materialised from secrets
+# at runtime; a committed one turns a vulnerability into a targeted one.
+.tfpfgen/sandbox/

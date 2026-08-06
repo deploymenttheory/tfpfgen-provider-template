@@ -1,0 +1,207 @@
+# The probe loop: exercise each resource's lifecycle against the sandbox
+# tenant, record the transcripts, and commit them as the evidence the generate
+# pipeline folds into every blueprint. Recordings are the one input the
+# document cannot supply -- what the API actually does -- and this workflow is
+# how they arrive without a person curating anything.
+#
+# The sandbox profile is materialised from secrets at runtime and never
+# committed: a tenant identifier in a committed file turns a vulnerability
+# into a targeted one, which is why the probe machinery refuses a profile
+# carrying a credential and why this job writes it fresh each run.
+#
+# Required repository secrets:
+#   TFPFGEN_PROBE_TOKEN       bearer token for the sandbox tenant
+#   TFPFGEN_PROBE_ENDPOINT    the API base URL, e.g. https://api.example.com/v1
+#   TFPFGEN_SANDBOX_EVIDENCE  a sentence (>= 4 words) stating why this tenant
+#                             is disposable; the guard requires the statement
+#   TFPFGEN_ACCOUNT_GROUP_ID  the sandbox account group the probe stays inside
+name: tfpfgen | Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource:
+        description: 'Probe one resource by blueprint key; omit to run every resource that has a scenario.'
+        required: false
+        type: string
+      force:
+        description: 'Record over recordings that are already committed.'
+        required: false
+        default: false
+        type: boolean
+      tfpfgen_ref:
+        description: 'tfpfgen version to install.'
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: tfpfgen-probe-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: '🔬 Record live-API evidence'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve the provider name
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          NAME="${REPO_NAME#terraform-provider-}"
+          {
+            echo "PROVIDER_NAME=${NAME}"
+            echo "OPENAPI_DIR=openapi/${NAME}"
+            echo "BLUEPRINT_DIR=blueprints/${NAME}"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          REF: ${{ inputs.tfpfgen_ref }}
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${REF}"
+          tfpfgen version
+
+      - name: Materialise the sandbox profile
+        # Written fresh from secrets, never committed, deleted before the PR
+        # step. The token itself stays in the environment -- the guard scans
+        # the profile and refuses one that embeds a credential.
+        env:
+          ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
+          EVIDENCE: ${{ secrets.TFPFGEN_SANDBOX_EVIDENCE }}
+          AID: ${{ secrets.TFPFGEN_ACCOUNT_GROUP_ID }}
+        run: |
+          for missing in ENDPOINT EVIDENCE AID; do
+            if [ -z "${!missing}" ]; then
+              echo "::error::secret behind ${missing} is not configured -- see the header of this workflow"
+              exit 1
+            fi
+          done
+          HOST=$(printf '%s' "$ENDPOINT" | sed -E 's|^https?://([^/]+).*|\1|')
+          mkdir -p .tfpfgen/sandbox
+          jq -n --arg endpoint "$ENDPOINT" --arg evidence "$EVIDENCE" \
+                --arg host "$HOST" --arg aid "$AID" '{
+            endpoint: $endpoint,
+            tokenEnv: "TFPFGEN_PROBE_TOKEN",
+            sandbox: true,
+            sandboxEvidence: $evidence,
+            namePrefix: "tfpfgen-probe",
+            assertions: {
+              endpointHostSuffix: $host,
+              maxExistingObjects: 25,
+              accountGroupParam: "aid",
+              accountGroupJsonPath: "aid",
+              accountGroupId: $aid
+            }
+          }' > ".tfpfgen/sandbox/${PROVIDER_NAME}.json"
+          echo "profile written for ${HOST}"
+
+      - name: Draft scenarios for resources that lack one
+        # The scenario names the fixtures and candidates a probe cannot
+        # discover. Drafting fills what the blueprint derives and marks the
+        # rest CURATE_ME; only a draft with nothing left to curate is promoted,
+        # and every one still carrying a marker is skipped by name. That is the
+        # stated fidelity limit of an unattended probe: influencer-gated
+        # conditional behaviour stays undiscovered until the drafter learns to
+        # derive it.
+        run: |
+          SCRATCH=$(mktemp -d)
+          tfpfgen blueprint draft -openapi-dir "${OPENAPI_DIR}" \
+            -sdk-dialect kiotaFluent \
+            -sdk-models-package "$(go list -m)/internal/sdk/models" \
+            -out "$(mktemp -d)" \
+            -scenario-drafts "$SCRATCH" || true
+          promoted=0
+          for draft in "$SCRATCH"/*.scenario.draft.json; do
+            [ -e "$draft" ] || continue
+            key=$(basename "$draft" .scenario.draft.json)
+            target="${BLUEPRINT_DIR}/${key}.scenario.json"
+            if [ -e "$target" ]; then
+              continue
+            fi
+            if grep -q "CURATE_ME" "$draft"; then
+              echo "skipped   ${key}: the drafted scenario still carries CURATE_ME markers"
+              continue
+            fi
+            cp "$draft" "$target"
+            echo "promoted  ${target}"
+            promoted=$((promoted + 1))
+          done
+          echo "${promoted} scenario(s) promoted"
+
+      - name: Record
+        env:
+          TFPFGEN_PROBE_TOKEN: ${{ secrets.TFPFGEN_PROBE_TOKEN }}
+          TFPFGEN_PROBE_ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
+          ONLY: ${{ inputs.resource }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          ARGS=(-blueprint "${BLUEPRINT_DIR}" -allow-mutations \
+                -profile ".tfpfgen/sandbox/${PROVIDER_NAME}.json" \
+                -provider "${PROVIDER_NAME}")
+          [ "${FORCE}" = "true" ] && ARGS+=(-force)
+          failures=0
+          if [ -n "${ONLY}" ]; then
+            keys="${ONLY}"
+          else
+            keys=$(ls "${BLUEPRINT_DIR}"/*.scenario.json 2>/dev/null \
+              | xargs -n1 basename 2>/dev/null | sed 's/\.scenario\.json$//')
+            if [ -z "$keys" ]; then
+              echo "no scenarios exist; nothing can be recorded"
+              exit 0
+            fi
+          fi
+          for key in $keys; do
+            echo "::group::🔬 probe record ${key}"
+            if ! tfpfgen probe record "${ARGS[@]}" -resource "$key"; then
+              echo "::warning::${key}: recording failed; see the group above"
+              failures=$((failures + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "${failures} resource(s) failed to record"
+
+      - name: Remove the sandbox profile
+        if: always()
+        run: rm -rf .tfpfgen/sandbox
+
+      - name: Open a pull request with the evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add "recordings/${PROVIDER_NAME}" "${BLUEPRINT_DIR}"/*.scenario.json 2>/dev/null || true
+          if [[ -z $(git status --porcelain --cached) ]]; then
+            echo "✅ no new evidence; nothing to propose"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="tfpfgen/probe-${PROVIDER_NAME}"
+          git checkout -B "$BRANCH"
+          git commit -m "Probe ${PROVIDER_NAME}: recorded live-API evidence" \
+            -m "tfpfgen probe run ${GITHUB_RUN_ID}. Recordings are replayable transcripts; their facts fold into the blueprints on the next generate run."
+          git push --force origin "HEAD:$BRANCH"
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$BRANCH" \
+            --title "tfpfgen: probe evidence for ${PROVIDER_NAME}" \
+            --body "Recorded by probe run ${GITHUB_RUN_ID}. Merging commits the evidence; the next generate dispatch folds its facts into the blueprints." \
+            || { echo "PR already open for $BRANCH; it now carries this run's evidence"; }
