@@ -1,52 +1,64 @@
-# The tfpfgen pipeline, whole. Point it at an OpenAPI document once; every run
-# after that re-derives the entire tree from committed state -- the pinned
-# snapshot, the SDK's own lock, go.mod and the recordings -- with nothing typed
-# from memory and nothing curated by hand. Every run lands as a pull request;
-# nothing is committed to the default branch directly.
+# Regenerates this provider from the API's OpenAPI document.
 #
-# The chain, in order: pin the document, generate the SDK, derive the provider
-# block, draft blueprints pruned against the real SDK, fold recorded probe
-# facts in, check the bindings, scaffold the shell, generate the provider, and
-# build and test what came out. The dispatch inputs that used to carry the SDK
-# settings are overrides now: the committed kiota-lock.json is the source of
-# truth, because a value a human retypes per run is a value that will one day
-# be typed wrong.
+# WHAT TO FILL IN
+#
+#   The very first run:  paste the OpenAPI document's URL into `openapi_url`.
+#   Every run after:     nothing. Press the button.
+#
+#   The other inputs are all optional overrides, and the form says so on each
+#   one. They exist for the first run and for unusual cases; leaving them empty
+#   is the normal answer, because everything they would set is already recorded
+#   in the repository -- the SDK's own lock file remembers how it was built,
+#   and the pinned document remembers where it came from. A setting a person
+#   retypes every run is a setting that will one day be typed wrong.
+#
+# WHAT IT DOES
+#
+#   Pins the API document, generates a Go SDK from it, works out the provider's
+#   shape, writes the provider's code, then compiles and unit-tests the result.
+#   Where probe recordings have been committed, what they observed about the
+#   live API is folded in on the way past.
+#
+#   Nothing in the tree is written by hand, so the run rebuilds all of it every
+#   time and proposes whatever changed as a pull request. Nothing is committed
+#   to the default branch directly. A run that finds nothing changed says so
+#   and proposes nothing.
 name: tfpfgen | Generate
 
 on:
   workflow_dispatch:
     inputs:
-      provider_name:
-        description: 'Provider name. Defaults to the repository name minus terraform-provider-. Names openapi/<name> and blueprints/<name>.'
-        required: false
-        type: string
       openapi_url:
-        description: 'OpenAPI document URL. Required on the first run; omit later to re-fetch from the pinned source.'
-        required: false
-        type: string
-      sdk_client_name:
-        description: 'Root client type name (kiota -c). Defaults to the committed kiota-lock.json''s clientClassName; ApiClient on a first run with no lock.'
-        required: false
-        type: string
-      sdk_include:
-        description: 'Restrict the SDK to these API path globs (comma-separated). Defaults to the committed lock''s includePatterns.'
-        required: false
-        type: string
-      sdk_exclude:
-        description: 'Drop these API path globs from the SDK (comma-separated). Defaults to the committed lock''s excludePatterns.'
+        description: 'FIRST RUN ONLY: link to the API''s OpenAPI document. Leave empty afterwards -- later runs re-fetch from wherever the first one got it.'
         required: false
         type: string
       tfpfgen_ref:
-        description: 'tfpfgen version to install (a tag, branch or commit of terraform-plugin-framework-codegen).'
+        description: 'Which version of the generator to use. Leave as "main" unless you are testing an unreleased change to it.'
         required: false
         default: main
         type: string
+      provider_name:
+        description: 'Leave empty. Only set this if the provider should be called something other than this repository''s name without the "terraform-provider-" prefix.'
+        required: false
+        type: string
+      sdk_client_name:
+        description: 'Leave empty. First run only: the name to give the generated Go client type, if you want something other than "ApiClient".'
+        required: false
+        type: string
+      sdk_include:
+        description: 'Leave empty. First run only: generate code for ONLY these API paths, comma-separated -- e.g. /tags,/tags/**'
+        required: false
+        type: string
+      sdk_exclude:
+        description: 'Leave empty. First run only: skip these API paths, comma-separated. Use for endpoints that break generation or that the provider will never manage.'
+        required: false
+        type: string
       kiota_version:
-        description: 'kiota release to install. Defaults to the committed kiota-lock.json''s kiotaVersion; required on a first run with no lock.'
+        description: 'Leave empty. First run only: which release of the kiota SDK generator to use. Later runs reuse whichever version built the committed SDK.'
         required: false
         type: string
       kiota_sha256:
-        description: 'sha256 of the kiota linux-x64 release zip. Verified when set; the run prints the computed digest either way, so pin it from the first run''s log.'
+        description: 'Leave empty. Optional: the expected checksum of the kiota download, to fail the run if it ever changes. Every run prints the actual value in its log.'
         required: false
         type: string
 
