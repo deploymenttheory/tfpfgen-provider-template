@@ -130,6 +130,13 @@ jobs:
             echo "PROBE_MAX_OBJECTS=$(jq -r '.probe.maxExistingObjects // 25' config.json)"
             echo "PROBE_SCOPE_PARAM=$(jq -r '.probe.accountScopeParam // empty' config.json)"
             echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
+            echo "PROBE_AUTH_METHOD=$(jq -r '.probe.authMethod // "bearerToken"' config.json)"
+            echo "PROBE_TOKEN_URL=$(jq -r '.probe.tokenUrl // .auth.tokenUrl // empty' config.json)"
+            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_TOKEN"' config.json)"
+            echo "PROBE_SECRET_CLIENT_ID=$(jq -r '.probe.secrets.clientId // "TFPFGEN_PROBE_CLIENT_ID"' config.json)"
+            echo "PROBE_SECRET_CLIENT_SECRET=$(jq -r '.probe.secrets.clientSecret // "TFPFGEN_PROBE_CLIENT_SECRET"' config.json)"
+            echo "PROBE_SECRET_USERNAME=$(jq -r '.probe.secrets.username // "TFPFGEN_PROBE_USERNAME"' config.json)"
+            echo "PROBE_SECRET_PASSWORD=$(jq -r '.probe.secrets.password // "TFPFGEN_PROBE_PASSWORD"' config.json)"
           } >> "$GITHUB_ENV"
           echo "provider=${NAME} document=${DOC_URL:-<re-fetch from the pinned snapshot>}"
 
@@ -154,21 +161,53 @@ jobs:
           ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
           EVIDENCE: ${{ secrets.TFPFGEN_SANDBOX_EVIDENCE }}
           AID: ${{ secrets.TFPFGEN_ACCOUNT_GROUP_ID }}
+          TOKEN: ${{ secrets.TFPFGEN_PROBE_TOKEN }}
+          CLIENT_ID: ${{ secrets.TFPFGEN_PROBE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.TFPFGEN_PROBE_CLIENT_SECRET }}
+          USERNAME: ${{ secrets.TFPFGEN_PROBE_USERNAME }}
+          PASSWORD: ${{ secrets.TFPFGEN_PROBE_PASSWORD }}
         run: |
-          for missing in ENDPOINT EVIDENCE AID; do
-            if [ -z "${!missing}" ]; then
-              echo "::error::secret behind ${missing} is not configured -- see the header of this workflow"
-              exit 1
-            fi
-          done
+          # Which credential secrets matter depends on how config.json says
+          # this API authenticates: demanding a token from an API that issues
+          # none would refuse a run that was correctly configured. Named by
+          # the secret a person would create, and all at once -- being told
+          # about one missing secret per run is several runs to learn the same
+          # thing.
+          missing=()
+          case "${PROBE_AUTH_METHOD}" in
+            clientCredentials)
+              [ -z "${CLIENT_ID}" ]     && missing+=("${PROBE_SECRET_CLIENT_ID}")
+              [ -z "${CLIENT_SECRET}" ] && missing+=("${PROBE_SECRET_CLIENT_SECRET}")
+              ;;
+            usernamePassword)
+              [ -z "${USERNAME}" ] && missing+=("${PROBE_SECRET_USERNAME}")
+              [ -z "${PASSWORD}" ] && missing+=("${PROBE_SECRET_PASSWORD}")
+              ;;
+            *)
+              [ -z "${TOKEN}" ] && missing+=("${PROBE_SECRET_TOKEN}")
+              ;;
+          esac
+          [ -z "${ENDPOINT}" ] && missing+=("TFPFGEN_PROBE_ENDPOINT")
+          [ -z "${EVIDENCE}" ] && missing+=("TFPFGEN_SANDBOX_EVIDENCE")
+          [ -z "${AID}" ]      && missing+=("TFPFGEN_ACCOUNT_GROUP_ID")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::the probe authenticates by ${PROBE_AUTH_METHOD} and needs repository secrets that are not set: ${missing[*]}. Add them under Settings -> Secrets and variables -> Actions, or leave 'probe the live api first' unticked to skip this job. CONFIGURING.md explains what each one is."
+            exit 1
+          fi
           HOST=$(printf '%s' "$ENDPOINT" | sed -E 's|^https?://([^/]+).*|\1|')
           mkdir -p .tfpfgen/sandbox
           jq -n --arg endpoint "$ENDPOINT" --arg evidence "$EVIDENCE" \
                 --arg host "$HOST" --arg aid "$AID" \
                 --arg prefix "$PROBE_NAME_PREFIX" --arg max "$PROBE_MAX_OBJECTS" \
-                --arg param "$PROBE_SCOPE_PARAM" --arg jsonpath "$PROBE_SCOPE_JSONPATH" '{
+                --arg param "$PROBE_SCOPE_PARAM" --arg jsonpath "$PROBE_SCOPE_JSONPATH" \
+                --arg method "$PROBE_AUTH_METHOD" --arg token_url "$PROBE_TOKEN_URL" \
+                --arg s_token "$PROBE_SECRET_TOKEN" \
+                --arg s_client_id "$PROBE_SECRET_CLIENT_ID" \
+                --arg s_client_secret "$PROBE_SECRET_CLIENT_SECRET" \
+                --arg s_username "$PROBE_SECRET_USERNAME" \
+                --arg s_password "$PROBE_SECRET_PASSWORD" '{
             endpoint: $endpoint,
-            tokenEnv: "TFPFGEN_PROBE_TOKEN",
+            authMethod: $method,
             sandbox: true,
             sandboxEvidence: $evidence,
             namePrefix: $prefix,
@@ -179,7 +218,12 @@ jobs:
             }
             + (if $param == "" then {} else {accountGroupParam: $param} end)
             + (if $jsonpath == "" then {} else {accountGroupJsonPath: $jsonpath} end))
-          }' > ".tfpfgen/sandbox/${PROVIDER_NAME}.json"
+          }
+          + (if $method == "clientCredentials" then
+               {clientIdEnv: $s_client_id, clientSecretEnv: $s_client_secret, tokenUrl: $token_url}
+             elif $method == "usernamePassword" then
+               {usernameEnv: $s_username, passwordEnv: $s_password}
+             else {tokenEnv: $s_token} end)' > ".tfpfgen/sandbox/${PROVIDER_NAME}.json"
           echo "profile written for ${HOST}"
 
       - name: Draft scenarios for resources that lack one
@@ -334,6 +378,13 @@ jobs:
             echo "PROBE_MAX_OBJECTS=$(jq -r '.probe.maxExistingObjects // 25' config.json)"
             echo "PROBE_SCOPE_PARAM=$(jq -r '.probe.accountScopeParam // empty' config.json)"
             echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
+            echo "PROBE_AUTH_METHOD=$(jq -r '.probe.authMethod // "bearerToken"' config.json)"
+            echo "PROBE_TOKEN_URL=$(jq -r '.probe.tokenUrl // .auth.tokenUrl // empty' config.json)"
+            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_TOKEN"' config.json)"
+            echo "PROBE_SECRET_CLIENT_ID=$(jq -r '.probe.secrets.clientId // "TFPFGEN_PROBE_CLIENT_ID"' config.json)"
+            echo "PROBE_SECRET_CLIENT_SECRET=$(jq -r '.probe.secrets.clientSecret // "TFPFGEN_PROBE_CLIENT_SECRET"' config.json)"
+            echo "PROBE_SECRET_USERNAME=$(jq -r '.probe.secrets.username // "TFPFGEN_PROBE_USERNAME"' config.json)"
+            echo "PROBE_SECRET_PASSWORD=$(jq -r '.probe.secrets.password // "TFPFGEN_PROBE_PASSWORD"' config.json)"
           } >> "$GITHUB_ENV"
           echo "provider=${NAME} document=${DOC_URL:-<re-fetch from the pinned snapshot>}"
 

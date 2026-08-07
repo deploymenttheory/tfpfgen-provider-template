@@ -17,6 +17,10 @@
     "version": "main"
   },
   "probe": {
+    "authMethod": "bearerToken",
+    "secrets": {
+      "token": "TFPFGEN_PROBE_TOKEN"
+    },
     "namePrefix": "tfpfgen-probe",
     "maxExistingObjects": 25,
     "accountScopeParam": "",
