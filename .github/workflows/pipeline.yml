@@ -158,9 +158,9 @@ jobs:
         # artifact is packed. The token itself stays in the environment -- the
         # guard scans the profile and refuses one that embeds a credential.
         env:
-          ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
-          EVIDENCE: ${{ secrets.TFPFGEN_SANDBOX_EVIDENCE }}
-          AID: ${{ secrets.TFPFGEN_ACCOUNT_GROUP_ID }}
+          ENDPOINT: ${{ secrets.TFPFGEN_PROBE_API_URL }}
+          EVIDENCE: ${{ secrets.TFPFGEN_PROBE_SANDBOX_REASON }}
+          AID: ${{ secrets.TFPFGEN_PROBE_ACCOUNT_SCOPE_ID }}
           TOKEN: ${{ secrets.TFPFGEN_PROBE_BEARER_TOKEN }}
           CLIENT_ID: ${{ secrets.TFPFGEN_PROBE_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.TFPFGEN_PROBE_CLIENT_SECRET }}
@@ -187,9 +187,15 @@ jobs:
               [ -z "${TOKEN}" ] && missing+=("${PROBE_SECRET_TOKEN}")
               ;;
           esac
-          [ -z "${ENDPOINT}" ] && missing+=("TFPFGEN_PROBE_ENDPOINT")
-          [ -z "${EVIDENCE}" ] && missing+=("TFPFGEN_SANDBOX_EVIDENCE")
-          [ -z "${AID}" ]      && missing+=("TFPFGEN_ACCOUNT_GROUP_ID")
+          [ -z "${ENDPOINT}" ] && missing+=("TFPFGEN_PROBE_API_URL")
+          [ -z "${EVIDENCE}" ] && missing+=("TFPFGEN_PROBE_SANDBOX_REASON")
+          # Only an API that scopes by account needs a scope to stay inside.
+          # config.json says whether this one does; Jamf Pro, for instance,
+          # does not, and demanding an identifier it has no concept of would
+          # refuse a correctly configured run.
+          if [ -n "${PROBE_SCOPE_PARAM}" ] && [ -z "${AID}" ]; then
+            missing+=("TFPFGEN_PROBE_ACCOUNT_SCOPE_ID")
+          fi
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::the probe authenticates by ${PROBE_AUTH_METHOD} and needs repository secrets that are not set: ${missing[*]}. Add them under Settings -> Secrets and variables -> Actions, or leave 'probe the live api first' unticked to skip this job. CONFIGURING.md explains what each one is."
             exit 1
@@ -213,9 +219,9 @@ jobs:
             namePrefix: $prefix,
             assertions: ({
               endpointHostSuffix: $host,
-              maxExistingObjects: ($max | tonumber),
-              accountGroupId: $aid
+              maxExistingObjects: ($max | tonumber)
             }
+            + (if $aid == "" then {} else {accountGroupId: $aid} end)
             + (if $param == "" then {} else {accountGroupParam: $param} end)
             + (if $jsonpath == "" then {} else {accountGroupJsonPath: $jsonpath} end))
           }
@@ -262,7 +268,7 @@ jobs:
       - name: Record
         env:
           TFPFGEN_PROBE_BEARER_TOKEN: ${{ secrets.TFPFGEN_PROBE_BEARER_TOKEN }}
-          TFPFGEN_PROBE_ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
+          TFPFGEN_PROBE_API_URL: ${{ secrets.TFPFGEN_PROBE_API_URL }}
           ONLY: ${{ inputs.probe_only_this_resource }}
           FORCE: ${{ inputs.probe_re_record_existing }}
         run: |
