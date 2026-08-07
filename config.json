@@ -1,7 +1,9 @@
 {
   "$comment": "How this provider is generated. See CONFIGURING.md. Replace every PLACEHOLDER before the first run; everything else has a working default.",
   "provider": {
-    "name": "PLACEHOLDER"
+    "name": "PLACEHOLDER",
+    "displayName": "",
+    "apiEndpoint": ""
   },
   "openapi": {
     "documentUrl": "PLACEHOLDER"

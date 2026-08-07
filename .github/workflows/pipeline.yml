@@ -117,6 +117,8 @@ jobs:
 
           {
             echo "PROVIDER_NAME=${NAME}"
+            echo "PROVIDER_DISPLAY_NAME=$(jq -r '.provider.displayName // empty' config.json)"
+            echo "PROVIDER_API_ENDPOINT=$(jq -r '.provider.apiEndpoint // empty' config.json)"
             echo "OPENAPI_DIR=openapi/${NAME}"
             echo "BLUEPRINT_DIR=blueprints/${NAME}"
             echo "OPENAPI_URL=${DOC_URL}"
@@ -371,6 +373,8 @@ jobs:
 
           {
             echo "PROVIDER_NAME=${NAME}"
+            echo "PROVIDER_DISPLAY_NAME=$(jq -r '.provider.displayName // empty' config.json)"
+            echo "PROVIDER_API_ENDPOINT=$(jq -r '.provider.apiEndpoint // empty' config.json)"
             echo "OPENAPI_DIR=openapi/${NAME}"
             echo "BLUEPRINT_DIR=blueprints/${NAME}"
             echo "OPENAPI_URL=${DOC_URL}"
@@ -500,8 +504,22 @@ jobs:
         # and the source block restates the snapshot just pinned. -force because
         # the block is derived output: it changes exactly when its inputs do.
         run: |
-          tfpfgen provider init -module . -name "${PROVIDER_NAME}" \
-            -openapi-dir "${OPENAPI_DIR}" -out "${BLUEPRINT_DIR}" -force
+          INIT=(-module . -name "${PROVIDER_NAME}" \
+            -openapi-dir "${OPENAPI_DIR}" -out "${BLUEPRINT_DIR}" -force)
+
+          # Two things the document cannot state. Capitalisation is not
+          # derivable -- the generator would write "Thousandeyes" for
+          # ThousandEyes and "Jamfpro" for Jamf Pro -- and a self-hosted API's
+          # server is per-customer, so the document names either none or the
+          # vendor's own. Passed only when set, so the derivation still runs.
+          if [ -n "${PROVIDER_DISPLAY_NAME}" ]; then
+            INIT+=(-display-name "${PROVIDER_DISPLAY_NAME}")
+          fi
+          if [ -n "${PROVIDER_API_ENDPOINT}" ]; then
+            INIT+=(-api-endpoint "${PROVIDER_API_ENDPOINT}")
+          fi
+
+          tfpfgen provider init "${INIT[@]}"
 
       - name: Draft blueprints against the pinned SDK
         # Canonical names, written straight into the blueprint directory:
