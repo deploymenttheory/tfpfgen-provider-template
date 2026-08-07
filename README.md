@@ -18,36 +18,39 @@ express it refuses by name rather than leaving for somebody to patch in.
    `terraform-provider-<name>` — the Terraform Registry conventions, the
    release packaging and the docs generation all derive the provider name from
    the repository name.
-2. **Run the `tfpfgen | Generate` workflow** (Actions → tfpfgen | Generate →
+2. **Run the `tfpfgen | Pipeline` workflow** (Actions → tfpfgen | Pipeline →
    Run workflow) with:
    - `openapi_url` — the OpenAPI document to pin. **First run only**; every run
      after re-fetches from the source the pinned snapshot itself records.
 
-   Everything else has a default. The provider name comes from the repository
-   name; the SDK's client name, path filters and kiota version come from the
-   `internal/sdk/kiota-lock.json` the first run commits. The dispatch inputs
-   exist to override those, not to carry them — a value a human retypes each
-   run is a value that will one day be typed wrong.
+   Everything else has a default, and the form says so on each field. The
+   provider name comes from the repository name; the SDK's client name, path
+   filters and kiota version come from the `internal/sdk/kiota-lock.json` the
+   first run commits. The inputs exist to override those, not to carry them — a
+   value a human retypes each run is a value that will one day be typed wrong.
 
    One run does the whole chain and opens one pull request: pin the document,
    generate the SDK, derive the provider block, draft blueprints pruned against
-   the real SDK, fold in any committed probe evidence, check the bindings,
-   scaffold the shell, generate the provider, then build and unit-test it on
-   the runner.
-3. **Run it again whenever an input changes** — a refreshed document, new probe
-   recordings, a newer tfpfgen. The run re-derives everything and proposes the
-   difference. If nothing changed, it says so and proposes nothing.
-4. **Record live evidence (optional but recommended).** Configure the probe
-   secrets below and dispatch `tfpfgen | Probe`. It exercises each resource's
-   lifecycle against a sandbox tenant and commits the transcripts as
-   `recordings/<name>/`. The next generate run folds their facts into the
-   blueprints automatically.
+   the real SDK, fold in probe evidence, check the bindings, scaffold the shell,
+   generate the provider, then build and unit-test it on the runner.
+3. **Run it again whenever an input changes** — a refreshed document, a newer
+   tfpfgen. The run re-derives everything and proposes the difference. If
+   nothing changed, it says so and proposes nothing.
+4. **Turn the probe on when you want live evidence.** Configure the probe
+   secrets below, then tick `record_evidence` on a run. A probe job goes first,
+   exercises each resource against a sandbox tenant, and hands what it observed
+   to the generate job — so the recordings and the provider they change arrive
+   in the *same* pull request.
 
    This is what a specification cannot tell you: which fields the API really
-   requires, what it fills in when you omit them, what it silently rewrites.
-   It also widens acceptance-test coverage mechanically, because a generated
-   fixture can only use attributes the spec marks required or the probe
-   observed as required.
+   requires, what it fills in when you omit them, what it silently rewrites. It
+   also widens acceptance-test coverage mechanically, because a generated
+   fixture can only use attributes the spec marks required or the probe observed
+   as required.
+
+   The probe is off by default because it is the only part that touches a live
+   system, and it is the only job holding the tenant's credentials — a job that
+   does not declare a secret cannot leak one.
 5. **Release.** Push a `v*` tag (or dispatch `provider | Terraform Provider
    Release`). goreleaser builds linux/darwin/windows on amd64/arm64, with the
    signed checksums and registry manifest the Terraform Registry requires.
@@ -58,10 +61,10 @@ express it refuses by name rather than leaving for somebody to patch in.
 |---|---|---|
 | `GPG_PRIVATE_KEY` | release | signs the checksums (registry requirement) |
 | `GPG_PRIVATE_KEY_PASSPHRASE` | release | only if the key has one |
-| `TFPFGEN_PROBE_TOKEN` | probe | bearer token for the sandbox tenant |
-| `TFPFGEN_PROBE_ENDPOINT` | probe | the API's base URL |
-| `TFPFGEN_SANDBOX_EVIDENCE` | probe | a sentence (≥ 4 words) stating why this tenant is disposable |
-| `TFPFGEN_ACCOUNT_GROUP_ID` | probe | the tenant scope the probe stays inside |
+| `TFPFGEN_PROBE_TOKEN` | probe job | bearer token for the sandbox tenant |
+| `TFPFGEN_PROBE_ENDPOINT` | probe job | the API's base URL |
+| `TFPFGEN_SANDBOX_EVIDENCE` | probe job | a sentence (≥ 4 words) stating why this tenant is disposable |
+| `TFPFGEN_ACCOUNT_GROUP_ID` | probe job | the tenant scope the probe stays inside |
 
 The generation pipeline needs no secrets: it uses the workflow's own
 `GITHUB_TOKEN` to open pull requests, and the OpenAPI document is fetched
