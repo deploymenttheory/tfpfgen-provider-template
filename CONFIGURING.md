@@ -120,7 +120,7 @@ do; the credentials themselves are repository secrets, never config.
 ```json
 "probe": {
   "authMethod": "bearerToken",
-  "secrets": { "token": "TFPFGEN_PROBE_TOKEN" },
+  "secrets": { "token": "TFPFGEN_PROBE_BEARER_TOKEN" },
   "namePrefix": "tfpfgen-probe",
   "maxExistingObjects": 25,
   "accountScopeParam": "",
@@ -139,7 +139,7 @@ values the generated provider supports:
 
 **`secrets`** maps each credential the method needs onto the **name of a
 repository secret** — never the value. The defaults are
-`TFPFGEN_PROBE_TOKEN`, `TFPFGEN_PROBE_CLIENT_ID`,
+`TFPFGEN_PROBE_BEARER_TOKEN`, `TFPFGEN_PROBE_CLIENT_ID`,
 `TFPFGEN_PROBE_CLIENT_SECRET`, `TFPFGEN_PROBE_USERNAME` and
 `TFPFGEN_PROBE_PASSWORD`, so most repositories can leave this out entirely and
 just create the secrets. Name them here when your organisation's secrets are

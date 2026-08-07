@@ -19,7 +19,7 @@
   "probe": {
     "authMethod": "bearerToken",
     "secrets": {
-      "token": "TFPFGEN_PROBE_TOKEN"
+      "token": "TFPFGEN_PROBE_BEARER_TOKEN"
     },
     "namePrefix": "tfpfgen-probe",
     "maxExistingObjects": 25,
