@@ -34,8 +34,8 @@ Nothing in this file is shaped around any one of them.
 | `sdk.clientTypeName` | `ThousandEyesClient` | `JamfProClient` | `GitHubClient` |
 | `sdk.includeOnlyPaths` | *(all)* | *(all)* | **essential — see below** |
 | `sdk.skipPaths` | three endpoint-agent paths | *(none)* | *(none)* |
-| `auth.method` | `bearerToken` | `clientCredentials` | `bearerToken` *(set by hand)* |
-| `auth.tokenUrl` | — | `/api/v1/oauth/token` | — |
+| `probe.authMethod` | `bearerToken` | `clientCredentials` | `bearerToken` *(set by hand)* |
+| `probe.tokenUrl` | — | `/api/v1/oauth/token` | — |
 | `probe.accountScopeParam` | `aid` | *(none)* | *(none)* |
 | paths in the document | 205 | 547 | 808 |
 
@@ -191,7 +191,7 @@ whose download does not match fails instead of generating from an unexpected
 binary. Every run prints the digest it computed, so the value to paste here is
 in the log of any successful run.
 
-### `auth.method` and `auth.tokenUrl`
+### `probe.authMethod` and `probe.tokenUrl`
 
 How the generated provider proves who it is. Three values, and the two
 examples use two of them:
@@ -199,10 +199,10 @@ examples use two of them:
 | Method | What the practitioner supplies | Example |
 |---|---|---|
 | `bearerToken` | a static token | ThousandEyes |
-| `clientCredentials` | a client id and secret, which the provider exchanges for a token at `auth.tokenUrl` | Jamf Pro |
+| `clientCredentials` | a client id and secret, which the provider exchanges for a token at `probe.tokenUrl` | Jamf Pro |
 | `usernamePassword` | a username and password, sent as HTTP Basic | — |
 
-`auth.tokenUrl` belongs to `clientCredentials` alone. A path rather than a URL
+`probe.tokenUrl` belongs to `clientCredentials` alone. A path rather than a URL
 means "on this same server" and is resolved against the endpoint — Jamf Pro
 declares `/api/v1/oauth/token`, which is right for software whose host differs
 per customer.
@@ -216,7 +216,7 @@ practitioner than one that cannot.
 it has no `securitySchemes` block and no top-level `security`, despite plainly
 requiring a token. There is nothing to derive from, so `provider init` falls
 back to `bearerToken` — which happens to be right for a personal access token,
-but only by luck. When a document is silent here, set `auth.method` yourself
+but only by luck. When a document is silent here, set `probe.authMethod` yourself
 and say in the commit message how you established it. A guess that happens to
 work is still a guess.
 
@@ -249,7 +249,7 @@ values the generated provider supports:
 | Method | Secrets it reads | Notes |
 |---|---|---|
 | `bearerToken` | `token` | The default. A static token. |
-| `clientCredentials` | `clientId`, `clientSecret` | The probe exchanges them for a token before it starts. Add `"tokenUrl"` here if the exchange happens somewhere other than the `auth.tokenUrl` above; a path is resolved against the endpoint. |
+| `clientCredentials` | `clientId`, `clientSecret` | The probe exchanges them for a token before it starts. Set `probe.tokenUrl` to where the exchange happens; a path is resolved against the endpoint. `auth.tokenUrl` is still read as a fallback, so an older config keeps working. |
 | `usernamePassword` | `username`, `password` | Sent as HTTP Basic. |
 
 **`secrets`** maps each credential the method needs onto the **name of a

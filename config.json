@@ -24,6 +24,7 @@
     "namePrefix": "tfpfgen-probe",
     "maxExistingObjects": 25,
     "accountScopeParam": "",
-    "accountScopeJsonPath": ""
+    "accountScopeJsonPath": "",
+    "tokenUrl": ""
   }
 }
