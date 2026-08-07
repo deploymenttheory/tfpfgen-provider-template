@@ -286,6 +286,53 @@ API first, whether to limit that to one resource, whether to re-record
 evidence it already has, and — rarely — a generator version to try without
 committing it. Everything declarative is in the file.
 
+## What a pull request is checked against
+
+`config.json` and **`tfpfgen | Pipeline`** describe how this provider is made.
+**`tfpfgen | Verify generated code`** is the other half of the arrangement: it
+runs on every pull request, and on demand, and asks whether what is committed is
+still what those inputs produce.
+
+It exists because stale generated code compiles perfectly well. A blueprint
+edited without a regeneration, a recording added that nothing folded in, an SDK
+left behind by a newer OpenAPI snapshot, a hand-edit to a generated file — none
+of these break the build, so without a gate none of them would be noticed until
+somebody wondered why the provider disagreed with its own documentation. The
+workflow regenerates from the committed inputs and fails when the worktree
+moves.
+
+Six questions are asked, each of which the others cannot answer. Regenerating
+the provider from its blueprints and diffing the worktree says whether the
+committed tree, its registry documentation and its formatting still follow from
+the blueprints; that diff is taken over a real regeneration rather than through
+a drift flag, because a flag compares the files the blueprints produce against
+disk and so cannot see a stale file the blueprints no longer produce. Type
+checking the blueprints' bindings against the pinned SDK reports a misnamed SDK
+symbol against the blueprint field that is wrong, rather than as a pile of
+identical compile errors. Regenerating the SDK from the snapshot its own
+`kiota-lock.json` names proves the committed SDK is still derived from the
+committed document. Exporting to HashiCorp's provider code specification and
+handing the result to their own `tfplugingen-framework` proves the export is not
+merely schema-valid but renderable, which is a different claim and the only one
+a third party can settle. Building the provider and running `terraform validate`
+over every generated example and fixture exercises the validators the schema
+actually emits, which nothing that only compiles can do. And replaying the
+committed probe recordings re-derives their facts from the transcripts alone.
+
+That last job runs with its egress blocked rather than audited, and that is the
+whole point of it: if no host an API could live on is reachable, a regression
+that quietly derived a fact from a live tenant fails there instead of passing
+against whichever sandbox somebody happened to have credentials for. Adding this
+provider's API host to that job's allowed endpoints would defeat it entirely.
+
+There is nothing here to configure. The workflow reads `provider.name`,
+`generator.version`, `sdk.kiotaVersion` and `sdk.kiotaDownloadChecksum` — the
+same keys, read the same way, as the pipeline that generated the tree it is
+policing. On a repository that has been stamped from the template but never
+generated it reports that there is nothing to verify and stands down, because a
+battery of red checks on a new repository's first pull request is the quickest
+way to teach everybody to ignore the workflow.
+
 ## What is not configured here
 
 - **Credentials and where to point the probe.** Repository secrets, every one

@@ -1,0 +1,872 @@
+# Fails when the committed generated code no longer matches the blueprints it was
+# generated from.
+#
+# Everything in this repository below the root is produced by tfpfgen. Nothing
+# stops a change to a blueprint, a recording, the pinned OpenAPI snapshot or the
+# generator's own version from landing without the output being regenerated, and
+# stale generated code compiles perfectly well -- so the drift would be
+# invisible. This regenerates and fails if anything moved.
+#
+# It is deliberately a separate workflow from `pipeline.yml`. That one is a
+# generation pipeline: it drafts, generates and opens a pull request, on a button
+# press. This one polices already-committed output on an incoming pull request.
+# Different question, different trigger, different permissions.
+#
+# There is no `paths:` filter, unlike the toolkit's equivalent. A provider repo
+# is almost entirely generated output, so a filter listing the paths that matter
+# would list nearly everything -- and a job that is skipped rather than run is
+# not a job that passed, which matters the moment any of these become required
+# checks.
+name: tfpfgen | Verify generated code
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything below needs the same handful of answers out of config.json, and
+  # a repository that has never been generated has nothing to police. Reading
+  # both once and handing them down as job outputs keeps the block that parses
+  # config.json in one place rather than copied into six jobs, where five of the
+  # copies would eventually be one revision behind.
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: '🧭 Read config.json'
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    outputs:
+      generated: ${{ steps.config.outputs.generated }}
+      provider: ${{ steps.config.outputs.provider }}
+      blueprint_dir: ${{ steps.config.outputs.blueprint_dir }}
+      openapi_dir: ${{ steps.config.outputs.openapi_dir }}
+      tfpfgen_ref: ${{ steps.config.outputs.tfpfgen_ref }}
+      kiota_version: ${{ steps.config.outputs.kiota_version }}
+      kiota_sha256: ${{ steps.config.outputs.kiota_sha256 }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # These jobs only read the tree; none of them runs git push.
+          persist-credentials: false
+
+      - name: Read config.json
+        id: config
+        # The same file, read the same way, as pipeline.yml reads it. The name it
+        # yields decides where the blueprints, the pinned document and the
+        # recordings live, so a second spelling here would police a different
+        # provider than the pipeline generates.
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          if [ ! -f config.json ]; then
+            echo "::error::config.json is missing. It names the API this provider is generated from; see CONFIGURING.md"
+            exit 1
+          fi
+          if ! jq empty config.json 2>/dev/null; then
+            echo "::error::config.json is not valid JSON"
+            exit 1
+          fi
+
+          NAME=$(jq -r '.provider.name // empty' config.json)
+          NAME="${NAME:-${REPO_NAME#terraform-provider-}}"
+
+          # `provider generate` writes .tfpfgen/manifest.json, so its absence means
+          # the pipeline has never produced a tree here and there is no generated
+          # output to police. A freshly stamped repository is not a broken one, and
+          # a battery of red checks on its first pull request is the fastest way to
+          # teach everybody to ignore this workflow.
+          GENERATED=false
+          if [ -f .tfpfgen/manifest.json ] && [ -d "blueprints/${NAME}" ]; then
+            GENERATED=true
+          fi
+
+          {
+            echo "generated=${GENERATED}"
+            echo "provider=${NAME}"
+            echo "blueprint_dir=blueprints/${NAME}"
+            echo "openapi_dir=openapi/${NAME}"
+            echo "tfpfgen_ref=$(jq -r '.generator.version // "main"' config.json)"
+            echo "kiota_version=$(jq -r '.sdk.kiotaVersion // empty' config.json)"
+            echo "kiota_sha256=$(jq -r '.sdk.kiotaDownloadChecksum // empty' config.json)"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "${GENERATED}" = "false" ]; then
+            echo "::notice::no generated provider is committed yet, so there is nothing to verify. Run the tfpfgen pipeline first."
+          fi
+          echo "provider=${NAME} generated=${GENERATED}"
+
+  # ---------------------------------------------------------------------------
+  # Regenerate from the committed blueprints and fail if the worktree moved.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: '🔁 Regenerate and diff'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BLUEPRINT_DIR: ${{ needs.preflight.outputs.blueprint_dir }}
+      TFPFGEN_REF: ${{ needs.preflight.outputs.tfpfgen_ref }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # These jobs only read the tree; none of them runs git push.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          # Straight from the repository, not through the module proxy, for the
+          # reason pipeline.yml states: the proxy caches a branch's resolution and
+          # a check that installs its own generator must track the ref's tip.
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
+          tfpfgen version
+
+      - name: Set up Terraform
+        # `provider generate`'s postcheck runs `terraform fmt -recursive` over the
+        # generated HCL and fails if it rewrote anything, so terraform has to be on
+        # PATH before generation rather than only in the job that validates.
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.12.1'
+          terraform_wrapper: false
+
+      - name: Download Dependencies
+        run: |
+          echo "::group::📦 Downloading Go modules"
+          go mod download
+          go mod verify
+          echo "::endgroup::"
+
+      # Generation reads only committed blueprints, so this needs no network and no
+      # credentials.
+      #
+      # Deliberately no `go mod tidy` retry, which is what pipeline.yml does when
+      # the postcheck refuses. There, a new document version legitimately
+      # introduces imports go.mod does not yet require and tidying is part of the
+      # proposal. Here, a tree that needs tidying before it builds is exactly the
+      # drift this job exists to report, and tidying would edit go.mod and go.sum
+      # and hide it in the diff it caused.
+      - name: Regenerate
+        run: |
+          echo "::group::🔁 Regenerating the provider"
+          tfpfgen provider generate -blueprint "${BLUEPRINT_DIR}" -out . -clean
+          echo "::endgroup::"
+
+      # git diff rather than `tfpfgen provider generate -check`, deliberately. verify
+      # compares the files the blueprints produce against disk, so it cannot see a
+      # stale file the blueprints no longer produce. Diffing the worktree after a
+      # real regeneration catches that too.
+      #
+      # It also catches two things no drift flag reports, because the postcheck
+      # writes them on its way past: registry documentation regenerated from the
+      # schema by tfplugindocs, and HCL that `terraform fmt` rewrote.
+      - name: Check for drift
+        run: |
+          if git diff --quiet; then
+            echo "✅ Generated code matches the blueprints."
+            exit 0
+          fi
+
+          echo "::error::Generated code is out of date. Run 'make provider-generate' and commit the result."
+          {
+            echo "### ❌ Generated code is out of date"
+            echo ""
+            echo "Run this locally and commit the result:"
+            echo ""
+            echo '```bash'
+            echo "tfpfgen provider generate -blueprint ${BLUEPRINT_DIR} -out . -clean"
+            echo '```'
+            echo ""
+            echo "<details><summary>Files that differ</summary>"
+            echo ""
+            echo '```'
+            git diff --stat
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          git diff --stat
+          exit 1
+
+      # A generator change can produce a clean diff and broken code, so a matching
+      # diff is necessary but not sufficient. TF_ACC=0 and the TestUnit prefix
+      # because the acceptance tests mutate a live tenant and have no credentials
+      # here by design.
+      - name: Build and test the provider
+        run: |
+          echo "::group::🔨 Build"
+          go build ./...
+          echo "::endgroup::"
+          echo "::group::🧪 Test"
+          TF_ACC=0 go test -p 8 -timeout 15m ./... -run '^TestUnit'
+          echo "::endgroup::"
+
+      # Emitted code must already be in the shape this repository's formatter would
+      # leave it, or a developer's editor rewrites it on first open and it then
+      # shows as drift with no source change.
+      #
+      # Note the 2>/dev/null: gofumpt writes progress to stderr, and merging that
+      # into the file list turns a cold module cache into a spurious failure.
+      - name: Formatting is a fixed point
+        run: |
+          echo "::group::✨ gofumpt"
+          unformatted=$(go run mvdan.cc/gofumpt@v0.9.1 -l . 2>/dev/null)
+          echo "::endgroup::"
+
+          if [ -z "$unformatted" ]; then
+            echo "✅ Emitted code is a gofumpt fixed point."
+            exit 0
+          fi
+
+          echo "::error::Emitted code is not gofumpt-clean. The generator must produce already-formatted output."
+          {
+            echo "### ❌ Emitted code is not gofumpt-clean"
+            echo ""
+            echo "The generator must emit already-formatted code, or this repository's"
+            echo "formatter will rewrite it and the next run will report drift."
+            echo ""
+            echo '```'
+            echo "$unformatted"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$unformatted"
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # The blueprints name SDK symbols as strings, so they can name ones that do not
+  # exist.
+  # ---------------------------------------------------------------------------
+  bindings:
+    name: '🔗 Verify SDK bindings'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BLUEPRINT_DIR: ${{ needs.preflight.outputs.blueprint_dir }}
+      TFPFGEN_REF: ${{ needs.preflight.outputs.tfpfgen_ref }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # These jobs only read the tree; none of them runs git push.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
+          tfpfgen version
+
+      # A blueprint names SDK symbols as strings, so it can name one that does not
+      # exist. That surfaces as a pile of identical compile errors in generated
+      # code; this reports it against the blueprint field that is actually wrong.
+      #
+      # It runs as its own job because it type-checks the SDK, which is slower than
+      # regeneration and independent of it. `-module .` is the provider's own
+      # module, which is what guarantees the SDK version checked is the version
+      # that will be compiled.
+      - name: Verify bindings against the pinned SDK
+        run: |
+          echo "::group::🔗 bindings check"
+          tfpfgen bindings check -blueprint "${BLUEPRINT_DIR}" -module .
+          echo "::endgroup::"
+
+      # Static facts are the ones derivable from the SDK's own types rather than
+      # from a live API: request fields whose zero value the SDK is structurally
+      # unable to send. Bump the SDK pin and this says whether the committed
+      # document went stale.
+      #
+      # The conditional is not defensiveness. `bindings facts -check` reads the
+      # document named by -out and fails if it is absent, and the pipeline does not
+      # produce one -- under the kiotaFluent dialect this template generates with,
+      # the derivation is empty by construction, because kiota's models are
+      # pointer-typed behind accessors and zero-value-unsendable cannot arise. So
+      # the check is armed when a repository commits such a document, and when none
+      # exists the derivation still runs and a *non-empty* result is the failure:
+      # facts the SDK carries that nothing has folded in.
+      - name: Static facts match the pinned SDK
+        run: |
+          FACTS="${BLUEPRINT_DIR}/static.facts.json"
+          if [ -f "$FACTS" ]; then
+            echo "::group::🔗 bindings facts -check"
+            tfpfgen bindings facts -blueprint "${BLUEPRINT_DIR}" -module . \
+              -out "$FACTS" -check
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "::group::🔗 bindings facts"
+          tfpfgen bindings facts -blueprint "${BLUEPRINT_DIR}" -module . \
+            -out "${RUNNER_TEMP}/static.facts.json"
+          echo "::endgroup::"
+
+          derived=$(jq 'length' "${RUNNER_TEMP}/static.facts.json")
+          if [ "$derived" -eq 0 ]; then
+            echo "✅ The pinned SDK carries no static facts, which is the expected answer for a kiota SDK."
+            exit 0
+          fi
+
+          echo "::error::the pinned SDK carries ${derived} static fact(s) and no static.facts.json is committed, so nothing has folded them in."
+          {
+            echo "### ❌ Static facts are unrecorded"
+            echo ""
+            echo "The pinned SDK carries ${derived} zero-value-unsendable fact(s) that no"
+            echo "committed document records. Derive and merge them:"
+            echo ""
+            echo '```bash'
+            echo "tfpfgen bindings facts -blueprint ${BLUEPRINT_DIR} -module . -out ${BLUEPRINT_DIR}/static.facts.json"
+            echo "tfpfgen blueprint merge -blueprint ${BLUEPRINT_DIR} -facts ${BLUEPRINT_DIR}/static.facts.json -strategy apply -recording static"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # The blueprints are ours; HashiCorp's specification format is not.
+  # ---------------------------------------------------------------------------
+  interop:
+    name: '🔀 Round-trip through tfplugingen-framework'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BLUEPRINT_DIR: ${{ needs.preflight.outputs.blueprint_dir }}
+      TFPFGEN_REF: ${{ needs.preflight.outputs.tfpfgen_ref }}
+      # Pinned rather than latest: the point of this job is that only our own
+      # mapping can break it. A floating third-party tool would turn somebody
+      # else's release into our red build.
+      TFPLUGINGEN_VERSION: 'v0.4.1'
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # These jobs only read the tree; none of them runs git push.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
+          tfpfgen version
+
+      # Exported to scratch rather than diffed against a committed copy, which is
+      # the one place this departs from the toolkit's own version of this job. The
+      # toolkit commits its export under specs/ and re-exports over it, because
+      # there the export is a reviewed artefact; the generate pipeline in this
+      # repository writes no such file, and a diff against a path that does not
+      # exist is a check that passes without ever looking at anything.
+      #
+      # What survives the change is the claim worth making, which was never about
+      # the file on disk.
+      - name: Export the provider code specification
+        run: |
+          echo "::group::🔀 spec export"
+          tfpfgen spec export -blueprint "${BLUEPRINT_DIR}" \
+            -out "${RUNNER_TEMP}/provider-code-spec.json"
+          echo "::endgroup::"
+
+      # This job is the reason the exporter exists.
+      #
+      # Our own tests assert the export satisfies HashiCorp's embedded JSON schema,
+      # which is a structural claim. It is not the same claim as "a tool can render
+      # it": the gap between the two is exactly where the format's known gaps live,
+      # and only a third party can close it.
+      #
+      # It is a *blocking* job on purpose. A non-blocking check goes red within a
+      # month and is ignored within two, at which point it is a standing lie about
+      # the state of the export. Blocking is safe here because the input is fixed --
+      # the committed blueprints, not a freshly inferred document -- and the tool is
+      # pinned, so the only thing that can break it is a change to the mapping,
+      # which is precisely what wants guarding.
+      - name: Generate with the real tfplugingen-framework
+        run: |
+          echo "::group::📦 Installing tfplugingen-framework ${TFPLUGINGEN_VERSION}"
+          go install "github.com/hashicorp/terraform-plugin-codegen-framework/cmd/tfplugingen-framework@${TFPLUGINGEN_VERSION}"
+          echo "::endgroup::"
+
+          echo "::group::🏗️ Generating"
+          tfplugingen-framework generate resources \
+            --input "${RUNNER_TEMP}/provider-code-spec.json" \
+            --output "${RUNNER_TEMP}/gen"
+          echo "::endgroup::"
+
+          # Their generator exiting 0 having written nothing would pass under set -e,
+          # so the output is asserted rather than assumed.
+          if [ -z "$(find "$RUNNER_TEMP/gen" -name '*.go' -print -quit)" ]; then
+            echo "::error::tfplugingen-framework produced no Go files from our export."
+            exit 1
+          fi
+
+          echo "::group::✨ gofmt"
+          cd "$RUNNER_TEMP/gen"
+          unformatted=$(gofmt -l .)
+          echo "::endgroup::"
+
+          if [ -n "$unformatted" ]; then
+            echo "::error::tfplugingen-framework produced Go that is not gofmt-clean, which means our export made it emit something malformed."
+            echo "$unformatted"
+            exit 1
+          fi
+
+          echo "✅ HashiCorp's own generator accepted the export and produced formatted Go."
+
+  # ---------------------------------------------------------------------------
+  # The committed SDK must still follow from the pinned OpenAPI snapshot.
+  # ---------------------------------------------------------------------------
+  sdk-drift:
+    name: '🧰 Kiota SDK matches the snapshot'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BLUEPRINT_DIR: ${{ needs.preflight.outputs.blueprint_dir }}
+      TFPFGEN_REF: ${{ needs.preflight.outputs.tfpfgen_ref }}
+      # config.json's sdk.kiotaVersion, which must equal the committed
+      # kiota-lock.json's kiotaVersion -- tfpfgen refuses otherwise. The checksum
+      # is optional because the kiota release publishes none; when it is set, a
+      # download that does not match fails rather than generating from an
+      # unexpected binary.
+      KIOTA_VERSION: ${{ needs.preflight.outputs.kiota_version }}
+      KIOTA_SHA256: ${{ needs.preflight.outputs.kiota_sha256 }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
+          tfpfgen version
+
+      - name: Install the pinned kiota
+        # linux-x64, matching pipeline.yml: the checksum in config.json is
+        # whichever archive that workflow downloaded, so a different architecture
+        # here would fail a correctly configured repository.
+        run: |
+          if [ -z "${KIOTA_VERSION}" ]; then
+            echo "::error::config.json names no sdk.kiotaVersion; see CONFIGURING.md"
+            exit 1
+          fi
+          echo "::group::🧰 kiota v${KIOTA_VERSION}"
+          curl -sL -o /tmp/kiota.zip \
+            "https://github.com/microsoft/kiota/releases/download/v${KIOTA_VERSION}/linux-x64.zip"
+          DIGEST=$(sha256sum /tmp/kiota.zip | cut -d' ' -f1)
+          echo "kiota v${KIOTA_VERSION} linux-x64 sha256: ${DIGEST}"
+          if [ -n "${KIOTA_SHA256}" ] && [ "${DIGEST}" != "${KIOTA_SHA256}" ]; then
+            echo "::error::kiota zip digest ${DIGEST} does not match the pinned ${KIOTA_SHA256}"
+            exit 1
+          fi
+          mkdir -p "$HOME/kiota"
+          unzip -q /tmp/kiota.zip -d "$HOME/kiota"
+          chmod +x "$HOME/kiota/kiota"
+          echo "$HOME/kiota" >> "$GITHUB_PATH"
+          echo "::endgroup::"
+
+      - name: Regenerate the SDK and diff
+        # One SDK, at internal/sdk, because that is the layout every provider
+        # this template stamps uses. The toolkit's equivalent discovers every
+        # kiota-lock.json under pilot/ and loops, which it has to: it carries
+        # several pilots and a hardcoded list would go stale the moment one was
+        # added. Here there is exactly one, named by the convention `sdk generate`
+        # and the makefile both already assume, so discovery would be a loop that
+        # can only ever run once.
+        #
+        # The lock names the snapshot it was generated from and the settings it
+        # was generated with (client class, include/exclude globs), so the
+        # invocation below states none of them -- retyping committed settings is
+        # what makes a "regeneration" produce a different SDK.
+        run: |
+          lock=internal/sdk/kiota-lock.json
+          if [ ! -f "$lock" ]; then
+            echo "::error::internal/sdk/kiota-lock.json is missing, so the committed SDK records nothing about how it was generated."
+            exit 1
+          fi
+
+          # Resolved by cd rather than realpath: portable, and it fails loudly
+          # if the lock names a snapshot that is no longer committed.
+          snapshot_abs="$(cd "internal/sdk/$(dirname "$(jq -r '.descriptionLocation' "$lock")")" && pwd)"
+          snapshot="${snapshot_abs#"$PWD"/}"
+
+          echo "::group::🧰 sdk generate -check internal/sdk"
+          tfpfgen sdk generate \
+            -openapi-dir "$(dirname "$snapshot")" \
+            -snapshot "$(basename "$snapshot")" \
+            -out internal/sdk \
+            -check
+          echo "::endgroup::"
+
+  # ---------------------------------------------------------------------------
+  # The recordings are HTTP evidence. This proves the facts committed beside them
+  # follow from the transcript and from nothing else.
+  # ---------------------------------------------------------------------------
+  probe-replay:
+    name: '🔬 Re-derive probe facts offline'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROVIDER_NAME: ${{ needs.preflight.outputs.provider }}
+      BLUEPRINT_DIR: ${{ needs.preflight.outputs.blueprint_dir }}
+      TFPFGEN_REF: ${{ needs.preflight.outputs.tfpfgen_ref }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          # Blocked rather than audited, unlike every other job here.
+          #
+          # What this proves, precisely: no host an API could live on is reachable, so a
+          # regression that tried to derive facts from a live tenant fails here. What it does
+          # *not* prove is that the job makes no network calls at all -- setting up Go,
+          # fetching modules and installing the generator obviously do, and the hosts below
+          # are exactly those.
+          #
+          # The stronger guarantee lives in the tool: replay mode is given a cassette-backed
+          # transport over a deny-everything transport, so a code path that bypassed the
+          # transcript errors rather than dialling. This job is the belt to that braces, and
+          # the reason it is worth having is that it would catch a change to the transport
+          # wiring itself.
+          #
+          # Adding this provider's own API host to the list below defeats the entire job.
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            go.dev:443
+            dl.google.com:443
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # These jobs only read the tree; none of them runs git push.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install tfpfgen
+        env:
+          GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
+        run: |
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
+          tfpfgen version
+
+      # The purity test. A committed cassette must yield exactly the facts committed with it,
+      # derived from the transcript alone -- no clock, no environment, no network. If derivation
+      # is not a pure function of the transcript then every fact in the store is unreproducible,
+      # and the whole premise of committing HTTP evidence collapses.
+      #
+      # Deliberately no credentials in this job's environment. Not "unused" -- absent, so a
+      # regression that reached for a live API fails here rather than passing quietly against a
+      # tenant somebody happened to have access to.
+      #
+      # A provider with no recordings yet is skipped rather than failed: `probe verify` refuses
+      # a run that verified nothing, correctly, because a green gate over an empty evidence tree
+      # proves nothing -- but the pipeline authors blueprints first and records second, so an
+      # empty tree is the normal state of a provider before its first probe.
+      - name: Verify facts reproduce with no network
+        run: |
+          if [ -z "$(find "recordings/${PROVIDER_NAME}" -name facts.json -print -quit 2>/dev/null)" ]; then
+            echo "::notice::no recordings are committed for ${PROVIDER_NAME}, so there are no facts to reproduce"
+            exit 0
+          fi
+
+          echo "::group::🔬 Replaying committed cassettes"
+          tfpfgen probe verify -blueprint "${BLUEPRINT_DIR}"
+          echo "::endgroup::"
+
+      # Committed evidence that nobody has folded in is evidence nobody is acting on.
+      - name: The blueprints reflect the recorded facts
+        run: |
+          echo "::group::🔀 blueprint merge -check"
+          for facts in "recordings/${PROVIDER_NAME}"/*/*/facts.json; do
+            [ -e "$facts" ] || continue
+            echo "checking $facts"
+            tfpfgen blueprint merge \
+              -blueprint "${BLUEPRINT_DIR}" \
+              -facts "$facts" \
+              -check \
+              -allow-conflicts
+          done
+          echo "::endgroup::"
+
+  # ---------------------------------------------------------------------------
+  # The gate that runs Terraform. Every other job here answers "does it compile" or
+  # "does it match the blueprint"; none of them can see a configuration the provider's
+  # own schema rejects.
+  #
+  # This is not hypothetical. In the toolkit's own pilot, a committed tag example
+  # carried `match_type = "all"` against a generated OneOf("and", "or") from the moment
+  # validators were generated, and nothing noticed, because nothing ran Terraform:
+  #
+  #   Error: Invalid Attribute Value Match
+  #   Attribute match_type value must be one of: ["and" "or"], got: "all"
+  # ---------------------------------------------------------------------------
+  terraform:
+    name: '🌍 Terraform validates the examples'
+    needs: preflight
+    if: needs.preflight.outputs.generated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROVIDER_NAME: ${{ needs.preflight.outputs.provider }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check Out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.12.1'
+          terraform_wrapper: false
+
+      # Committed HCL must already be in the shape terraform fmt leaves it, for the same
+      # reason emitted Go must be a gofumpt fixed point: a file the canonical formatter
+      # rewrites shows up as drift with no source change. The generated fixtures are
+      # aligned by the generator itself, which is what this keeps honest.
+      - name: HCL is a terraform fmt fixed point
+        run: |
+          echo "::group::✨ terraform fmt"
+          terraform fmt -check -recursive -diff .
+          echo "::endgroup::"
+
+      # dev_overrides rather than a published provider, because a pull request predates
+      # publishing by definition. It also means no `terraform init`: the override is
+      # resolved from disk, so there is no registry lookup and no version constraint to
+      # satisfy.
+      #
+      # The registry address is the module path's owner and the provider name, which is
+      # the same derivation the generator uses when it writes examples/provider/provider.tf.
+      # Reading it back off go.mod rather than restating it is what keeps the two in step
+      # in a repository that was forked, renamed or moved to another organisation.
+      - name: Build the provider and point Terraform at it
+        run: |
+          MODULE=$(go list -m)
+          OWNER=$(printf '%s\n' "$MODULE" | cut -d/ -f2)
+          echo "PROVIDER_SOURCE=${OWNER}/${PROVIDER_NAME}" >> "$GITHUB_ENV"
+
+          echo "::group::🔨 Building the provider"
+          mkdir -p "${RUNNER_TEMP}/tfdev"
+          go build -o "${RUNNER_TEMP}/tfdev/terraform-provider-${PROVIDER_NAME}" .
+          echo "::endgroup::"
+
+          cat > "${RUNNER_TEMP}/dev.tfrc" <<EOF
+          provider_installation {
+            dev_overrides {
+              "${OWNER}/${PROVIDER_NAME}" = "${RUNNER_TEMP}/tfdev"
+            }
+            direct {}
+          }
+          EOF
+
+      # Validation runs the provider's own ValidateResourceConfig, so every generated
+      # validator -- OneOf, RegexMatches, Length*, Size*, and the cross-attribute rules --
+      # is exercised against real committed HCL.
+      #
+      # Each example is copied into a scratch directory first. Registry examples
+      # conventionally carry no terraform block -- tfplugindocs embeds the file verbatim,
+      # and a required_providers stanza on every docs page is noise -- but without one,
+      # `<provider>_<thing>` resolves to hashicorp/<provider> and validation fails looking
+      # for a provider that does not exist. The requirement is injected only where the
+      # example does not already declare it, so the provider example's own block stays
+      # the one exercised.
+      - name: Terraform validates every example
+        env:
+          TF_CLI_CONFIG_FILE: ${{ runner.temp }}/dev.tfrc
+        run: |
+          failed=0
+
+          while IFS= read -r dir; do
+            scratch="${RUNNER_TEMP}/example"
+            rm -rf "$scratch"
+            mkdir -p "$scratch"
+            cp "$dir"/*.tf "$scratch/"
+
+            if ! grep -rq "required_providers" "$scratch"; then
+              cat > "$scratch/versions.tf" <<EOF
+          terraform {
+            required_providers {
+              ${PROVIDER_NAME} = {
+                source = "${PROVIDER_SOURCE}"
+              }
+            }
+          }
+          EOF
+            fi
+
+            echo "::group::🌍 terraform validate $dir"
+            if terraform -chdir="$scratch" validate; then
+              echo "✅ $dir"
+            else
+              echo "::error file=$dir::terraform validate rejected this configuration"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -type f -name '*.tf' -not -path '*/testdata/*' -not -path './.git/*' \
+            -exec dirname {} \; | sort -u)
+
+          exit "$failed"
+
+      # Fixtures are fragments rather than configurations, and are validated one at a time.
+      #
+      # Two reasons they cannot be validated where they sit. minimal.tf and maximal.tf both
+      # declare the same resource address -- they are alternatives for successive test steps,
+      # never applied together -- and Terraform reads a directory as one configuration, so it
+      # reports a duplicate. They also carry no `terraform` block, because the acceptance test
+      # supplies the provider through ProtoV6ProviderFactories rather than through HCL; without
+      # one, Terraform would resolve `<provider>_<thing>` to hashicorp/<provider> and fail
+      # looking for a provider that does not exist.
+      #
+      # So each is copied into a scratch directory beside a synthesised provider block. That
+      # wrapper is the acceptance harness's job expressed in HCL, and nothing else.
+      - name: Terraform validates every generated fixture
+        env:
+          TF_CLI_CONFIG_FILE: ${{ runner.temp }}/dev.tfrc
+        run: |
+          failed=0
+
+          while IFS= read -r fixture; do
+            # Two fixture shapes cannot be validated this way, each for a stated
+            # structural reason rather than convenience:
+            #
+            # query.tf holds a `list` block, which is input to `terraform query` --
+            # `terraform validate` rejects the block type outright, on every
+            # Terraform version. Its generated acceptance test is what exercises it.
+            #
+            # ephemeral.tf hands the opened value to the echo provider, which exists
+            # only in-process via the acceptance harness's ProtoV6ProviderFactories;
+            # there is nothing on any registry for validate to resolve it against.
+            case "$(basename "$fixture")" in
+              query.tf|ephemeral.tf)
+                echo "⏭️  $fixture (not a configuration terraform validate can check)"
+                continue
+                ;;
+            esac
+
+            scratch="${RUNNER_TEMP}/fixture"
+            rm -rf "$scratch"
+            mkdir -p "$scratch"
+
+            cat > "$scratch/provider.tf" <<EOF
+          terraform {
+            required_version = ">= 1.0"
+            required_providers {
+              ${PROVIDER_NAME} = {
+                source = "${PROVIDER_SOURCE}"
+              }
+            }
+          }
+          EOF
+
+            cp "$fixture" "$scratch/"
+
+            echo "::group::🌍 terraform validate $fixture"
+            if terraform -chdir="$scratch" validate; then
+              echo "✅ $fixture"
+            else
+              echo "::error file=$fixture::terraform validate rejected this fixture"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -type f -path '*/testdata/*.tf' -not -path './.git/*' | sort)
+
+          exit "$failed"

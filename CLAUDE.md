@@ -20,21 +20,22 @@ later, with no obvious cause.
 
 Anything this template hands to the toolkit or tells a user about it:
 
-- `pipeline.yml` invokes the tfpfgen CLI directly — new verbs, renamed flags,
-  and **changed flag defaults** all land here
-- `config.json` must declare every key the pipeline reads, including keys only
+- `pipeline.yml` and `verify.yml` invoke the tfpfgen CLI directly — new verbs,
+  renamed flags, and **changed flag defaults** all land here
+- a check the toolkit drops because its own artefacts moved downstream belongs
+  in `verify.yml`, where those artefacts now live
+- `config.json` must declare every key the workflows read, including keys only
   one auth method uses
 - secret names must match exactly what the toolkit expects
 - `CONFIGURING.md` must describe current behaviour, not previous behaviour
 
 ### The check worth running every time
 
-Does `pipeline.yml` read a `config.json` key that `config.json` does not
-declare?
+Does a workflow read a `config.json` key that `config.json` does not declare?
 
 ```bash
 grep -oE '\.(provider|openapi|sdk|generator|probe|auth)\.[a-zA-Z]+' \
-  .github/workflows/pipeline.yml | sort -u
+  .github/workflows/*.yml | sort -u
 ```
 
 Compare that list against `config.json`. `jq` returns `null` for a missing key
