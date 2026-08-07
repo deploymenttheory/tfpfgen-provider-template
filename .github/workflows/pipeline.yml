@@ -36,10 +36,6 @@ name: tfpfgen | Pipeline
 on:
   workflow_dispatch:
     inputs:
-      openapi_document_url:
-        description: 'Paste this on the FIRST run only -- the link to the API''s OpenAPI/Swagger document. Leave empty afterwards: later runs re-fetch from wherever the first one got it.'
-        required: false
-        type: string
       probe_the_live_api_first:
         description: 'Creates and deletes real objects in the sandbox tenant to learn how the API actually behaves, then folds what it saw into this run. Off by default.'
         required: false
@@ -54,33 +50,8 @@ on:
         required: false
         default: false
         type: boolean
-      tfpfgen_version:
-        description: 'Which release of the code generator to use. Leave as "main" unless you are testing an unreleased change to it.'
-        required: false
-        default: main
-        type: string
-      provider_name_override:
-        description: 'Leave empty. The provider is named after this repository, minus the "terraform-provider-" prefix; set this only to call it something else.'
-        required: false
-        type: string
-      sdk_client_type_name:
-        description: 'Leave empty. First run only: what to call the generated Go client type, if not "ApiClient".'
-        required: false
-        type: string
-      sdk_include_only_these_paths:
-        description: 'Leave empty. First run only: generate code for ONLY these API paths, comma-separated -- e.g. /tags,/tags/**'
-        required: false
-        type: string
-      sdk_skip_these_paths:
-        description: 'Leave empty. First run only: API paths to skip, comma-separated. Use for endpoints that break generation or that this provider will never manage.'
-        required: false
-        type: string
-      kiota_version:
-        description: 'Leave empty. First run only: which release of Microsoft Kiota builds the SDK. Later runs reuse whichever version built the committed one.'
-        required: false
-        type: string
-      kiota_download_checksum:
-        description: 'Leave empty. Optional: the expected checksum of the Kiota download, to fail the run if it ever changes. Every run prints the actual value in its log.'
+      tfpfgen_version_override:
+        description: 'Leave empty. Runs the generator at a different version than config.json names, for testing an unreleased change without committing it.'
         required: false
         type: string
 
@@ -112,17 +83,55 @@ jobs:
       - name: Check Out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve the provider name
+      - name: Read config.json
+        # The one file a person edits. Everything the pipeline needs to know
+        # about this API lives here, committed and reviewable, rather than in a
+        # dispatch form somebody retypes each run -- a setting typed per run is
+        # a setting that will one day be typed wrong.
         env:
-          INPUT_NAME: ${{ inputs.provider_name_override }}
           REPO_NAME: ${{ github.event.repository.name }}
+          TFPFGEN_OVERRIDE: ${{ inputs.tfpfgen_version_override }}
         run: |
-          NAME="${INPUT_NAME:-${REPO_NAME#terraform-provider-}}"
+          if [ ! -f config.json ]; then
+            echo "::error::config.json is missing. It names the API document to generate from; see CONFIGURING.md"
+            exit 1
+          fi
+          if ! jq empty config.json 2>/dev/null; then
+            echo "::error::config.json is not valid JSON"
+            exit 1
+          fi
+
+          NAME=$(jq -r '.provider.name // empty' config.json)
+          NAME="${NAME:-${REPO_NAME#terraform-provider-}}"
+
+          DOC_URL=$(jq -r '.openapi.documentUrl // empty' config.json)
+          if [ -z "${DOC_URL}" ] || [ "${DOC_URL}" = "PLACEHOLDER" ]; then
+            if [ ! -d "openapi/${NAME}" ]; then
+              echo "::error::config.json does not name an OpenAPI document (openapi.documentUrl) and no snapshot is pinned yet; see CONFIGURING.md"
+              exit 1
+            fi
+            # Already pinned once: the snapshot records where it came from, so
+            # an empty URL means "re-fetch from that" rather than an error.
+            DOC_URL=""
+          fi
+
           {
             echo "PROVIDER_NAME=${NAME}"
             echo "OPENAPI_DIR=openapi/${NAME}"
             echo "BLUEPRINT_DIR=blueprints/${NAME}"
+            echo "OPENAPI_URL=${DOC_URL}"
+            echo "SDK_CLIENT_NAME=$(jq -r '.sdk.clientTypeName // "ApiClient"' config.json)"
+            echo "SDK_INCLUDE=$(jq -r '(.sdk.includeOnlyPaths // []) | join(",")' config.json)"
+            echo "SDK_EXCLUDE=$(jq -r '(.sdk.skipPaths // []) | join(",")' config.json)"
+            echo "KIOTA_VERSION=$(jq -r '.sdk.kiotaVersion // empty' config.json)"
+            echo "KIOTA_SHA256=$(jq -r '.sdk.kiotaDownloadChecksum // empty' config.json)"
+            echo "TFPFGEN_REF=${TFPFGEN_OVERRIDE:-$(jq -r '.generator.version // "main"' config.json)}"
+            echo "PROBE_NAME_PREFIX=$(jq -r '.probe.namePrefix // "tfpfgen-probe"' config.json)"
+            echo "PROBE_MAX_OBJECTS=$(jq -r '.probe.maxExistingObjects // 25' config.json)"
+            echo "PROBE_SCOPE_PARAM=$(jq -r '.probe.accountScopeParam // empty' config.json)"
+            echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
           } >> "$GITHUB_ENV"
+          echo "provider=${NAME} document=${DOC_URL:-<re-fetch from the pinned snapshot>}"
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -132,10 +141,9 @@ jobs:
 
       - name: Install tfpfgen
         env:
-          REF: ${{ inputs.tfpfgen_version }}
           GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
         run: |
-          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${REF}"
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
           tfpfgen version
 
       - name: Materialise the sandbox profile
@@ -156,19 +164,21 @@ jobs:
           HOST=$(printf '%s' "$ENDPOINT" | sed -E 's|^https?://([^/]+).*|\1|')
           mkdir -p .tfpfgen/sandbox
           jq -n --arg endpoint "$ENDPOINT" --arg evidence "$EVIDENCE" \
-                --arg host "$HOST" --arg aid "$AID" '{
+                --arg host "$HOST" --arg aid "$AID" \
+                --arg prefix "$PROBE_NAME_PREFIX" --arg max "$PROBE_MAX_OBJECTS" \
+                --arg param "$PROBE_SCOPE_PARAM" --arg jsonpath "$PROBE_SCOPE_JSONPATH" '{
             endpoint: $endpoint,
             tokenEnv: "TFPFGEN_PROBE_TOKEN",
             sandbox: true,
             sandboxEvidence: $evidence,
-            namePrefix: "tfpfgen-probe",
-            assertions: {
+            namePrefix: $prefix,
+            assertions: ({
               endpointHostSuffix: $host,
-              maxExistingObjects: 25,
-              accountGroupParam: "aid",
-              accountGroupJsonPath: "aid",
+              maxExistingObjects: ($max | tonumber),
               accountGroupId: $aid
             }
+            + (if $param == "" then {} else {accountGroupParam: $param} end)
+            + (if $jsonpath == "" then {} else {accountGroupJsonPath: $jsonpath} end))
           }' > ".tfpfgen/sandbox/${PROVIDER_NAME}.json"
           echo "profile written for ${HOST}"
 
@@ -277,17 +287,55 @@ jobs:
       - name: Check Out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Resolve the provider name
+      - name: Read config.json
+        # The one file a person edits. Everything the pipeline needs to know
+        # about this API lives here, committed and reviewable, rather than in a
+        # dispatch form somebody retypes each run -- a setting typed per run is
+        # a setting that will one day be typed wrong.
         env:
-          INPUT_NAME: ${{ inputs.provider_name_override }}
           REPO_NAME: ${{ github.event.repository.name }}
+          TFPFGEN_OVERRIDE: ${{ inputs.tfpfgen_version_override }}
         run: |
-          NAME="${INPUT_NAME:-${REPO_NAME#terraform-provider-}}"
+          if [ ! -f config.json ]; then
+            echo "::error::config.json is missing. It names the API document to generate from; see CONFIGURING.md"
+            exit 1
+          fi
+          if ! jq empty config.json 2>/dev/null; then
+            echo "::error::config.json is not valid JSON"
+            exit 1
+          fi
+
+          NAME=$(jq -r '.provider.name // empty' config.json)
+          NAME="${NAME:-${REPO_NAME#terraform-provider-}}"
+
+          DOC_URL=$(jq -r '.openapi.documentUrl // empty' config.json)
+          if [ -z "${DOC_URL}" ] || [ "${DOC_URL}" = "PLACEHOLDER" ]; then
+            if [ ! -d "openapi/${NAME}" ]; then
+              echo "::error::config.json does not name an OpenAPI document (openapi.documentUrl) and no snapshot is pinned yet; see CONFIGURING.md"
+              exit 1
+            fi
+            # Already pinned once: the snapshot records where it came from, so
+            # an empty URL means "re-fetch from that" rather than an error.
+            DOC_URL=""
+          fi
+
           {
             echo "PROVIDER_NAME=${NAME}"
             echo "OPENAPI_DIR=openapi/${NAME}"
             echo "BLUEPRINT_DIR=blueprints/${NAME}"
+            echo "OPENAPI_URL=${DOC_URL}"
+            echo "SDK_CLIENT_NAME=$(jq -r '.sdk.clientTypeName // "ApiClient"' config.json)"
+            echo "SDK_INCLUDE=$(jq -r '(.sdk.includeOnlyPaths // []) | join(",")' config.json)"
+            echo "SDK_EXCLUDE=$(jq -r '(.sdk.skipPaths // []) | join(",")' config.json)"
+            echo "KIOTA_VERSION=$(jq -r '.sdk.kiotaVersion // empty' config.json)"
+            echo "KIOTA_SHA256=$(jq -r '.sdk.kiotaDownloadChecksum // empty' config.json)"
+            echo "TFPFGEN_REF=${TFPFGEN_OVERRIDE:-$(jq -r '.generator.version // "main"' config.json)}"
+            echo "PROBE_NAME_PREFIX=$(jq -r '.probe.namePrefix // "tfpfgen-probe"' config.json)"
+            echo "PROBE_MAX_OBJECTS=$(jq -r '.probe.maxExistingObjects // 25' config.json)"
+            echo "PROBE_SCOPE_PARAM=$(jq -r '.probe.accountScopeParam // empty' config.json)"
+            echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
           } >> "$GITHUB_ENV"
+          echo "provider=${NAME} document=${DOC_URL:-<re-fetch from the pinned snapshot>}"
 
       - name: Take in the probe's evidence
         if: ${{ needs.probe.result == 'success' }}
@@ -302,41 +350,6 @@ jobs:
           echo "recordings now present: $(find "recordings/${PROVIDER_NAME}" -name facts.json 2>/dev/null | wc -l)"
           git status --porcelain "recordings" "${BLUEPRINT_DIR}" | sed 's/^/  /' || true
 
-      # The committed lock is the source of truth for how the SDK was generated;
-      # the dispatch inputs override it, and a first run with no lock falls back
-      # to them. Deriving these here is what makes a default dispatch reproduce
-      # main instead of depending on what somebody remembered to type.
-      - name: Resolve the SDK settings from the committed lock
-        env:
-          IN_CLIENT: ${{ inputs.sdk_client_type_name }}
-          IN_INCLUDE: ${{ inputs.sdk_include_only_these_paths }}
-          IN_EXCLUDE: ${{ inputs.sdk_skip_these_paths }}
-          IN_KIOTA: ${{ inputs.kiota_version }}
-        run: |
-          LOCK=internal/sdk/kiota-lock.json
-          CLIENT="" INCLUDE="" EXCLUDE="" KIOTA=""
-          if [ -f "$LOCK" ]; then
-            CLIENT=$(jq -r '.clientClassName // empty' "$LOCK")
-            INCLUDE=$(jq -r '(.includePatterns // []) | join(",")' "$LOCK")
-            EXCLUDE=$(jq -r '(.excludePatterns // []) | join(",")' "$LOCK")
-            KIOTA=$(jq -r '.kiotaVersion // empty' "$LOCK" | cut -d'-' -f1)
-          fi
-          CLIENT="${IN_CLIENT:-${CLIENT:-ApiClient}}"
-          INCLUDE="${IN_INCLUDE:-${INCLUDE}}"
-          EXCLUDE="${IN_EXCLUDE:-${EXCLUDE}}"
-          KIOTA="${IN_KIOTA:-${KIOTA}}"
-          if [ -z "$KIOTA" ]; then
-            echo "::error::no committed kiota-lock.json and no kiota_version input -- one of them must name the release"
-            exit 1
-          fi
-          {
-            echo "SDK_CLIENT_NAME=${CLIENT}"
-            echo "SDK_INCLUDE=${INCLUDE}"
-            echo "SDK_EXCLUDE=${EXCLUDE}"
-            echo "KIOTA_VERSION=${KIOTA}"
-          } >> "$GITHUB_ENV"
-          echo "client=${CLIENT} include=${INCLUDE:-<none>} exclude=${EXCLUDE:-<none>} kiota=${KIOTA}"
-
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -345,7 +358,6 @@ jobs:
 
       - name: Install tfpfgen
         env:
-          REF: ${{ inputs.tfpfgen_version }}
           # Straight from the repository, not through the module proxy: the
           # proxy caches a branch's resolution for up to half an hour, and a
           # pipeline that installs its own generator must track the ref's tip,
@@ -353,13 +365,15 @@ jobs:
           # database, which lags fresh commits the same way.
           GOPRIVATE: github.com/deploymenttheory/terraform-plugin-framework-codegen
         run: |
-          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${REF}"
+          go install "github.com/deploymenttheory/terraform-plugin-framework-codegen/cmd/tfpfgen@${TFPFGEN_REF}"
           tfpfgen version
 
       - name: Install kiota
-        env:
-          KIOTA_SHA256: ${{ inputs.kiota_download_checksum }}
         run: |
+          if [ -z "${KIOTA_VERSION}" ]; then
+            echo "::error::config.json names no sdk.kiotaVersion; see CONFIGURING.md"
+            exit 1
+          fi
           curl -sL -o /tmp/kiota.zip \
             "https://github.com/microsoft/kiota/releases/download/v${KIOTA_VERSION}/linux-x64.zip"
           DIGEST=$(sha256sum /tmp/kiota.zip | cut -d' ' -f1)
@@ -388,8 +402,6 @@ jobs:
         run: go mod download all
 
       - name: Pin the OpenAPI document
-        env:
-          OPENAPI_URL: ${{ inputs.openapi_document_url }}
         run: |
           if [ -n "${OPENAPI_URL}" ]; then
             tfpfgen openapi fetch -url "${OPENAPI_URL}" -out "${OPENAPI_DIR}"

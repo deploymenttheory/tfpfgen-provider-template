@@ -1,0 +1,25 @@
+{
+  "$comment": "How this provider is generated. See CONFIGURING.md. Replace every PLACEHOLDER before the first run; everything else has a working default.",
+  "provider": {
+    "name": "PLACEHOLDER"
+  },
+  "openapi": {
+    "documentUrl": "PLACEHOLDER"
+  },
+  "sdk": {
+    "clientTypeName": "ApiClient",
+    "includeOnlyPaths": [],
+    "skipPaths": [],
+    "kiotaVersion": "1.34.1",
+    "kiotaDownloadChecksum": ""
+  },
+  "generator": {
+    "version": "main"
+  },
+  "probe": {
+    "namePrefix": "tfpfgen-probe",
+    "maxExistingObjects": 25,
+    "accountScopeParam": "",
+    "accountScopeJsonPath": ""
+  }
+}

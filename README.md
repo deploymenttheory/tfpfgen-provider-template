@@ -18,25 +18,27 @@ express it refuses by name rather than leaving for somebody to patch in.
    `terraform-provider-<name>` — the Terraform Registry conventions, the
    release packaging and the docs generation all derive the provider name from
    the repository name.
-2. **Run the `tfpfgen | Pipeline` workflow** (Actions → tfpfgen | Pipeline →
-   Run workflow) with:
-   - `openapi_url` — the OpenAPI document to pin. **First run only**; every run
-     after re-fetches from the source the pinned snapshot itself records.
+2. **Fill in `config.json`.** It sits at the repository root and is the only
+   file you configure. Replace every `PLACEHOLDER`:
 
-   Everything else has a default, and the form says so on each field. The
-   provider name comes from the repository name; the SDK's client name, path
-   filters and kiota version come from the `internal/sdk/kiota-lock.json` the
-   first run commits. The inputs exist to override those, not to carry them — a
-   value a human retypes each run is a value that will one day be typed wrong.
+   - `provider.name` — the provider's name, e.g. `acme` for
+     `terraform-provider-acme`
+   - `openapi.documentUrl` — a link to the API's OpenAPI/Swagger document
+
+   Everything else already has a working default.
+   [CONFIGURING.md](CONFIGURING.md) explains each setting and when to change
+   it.
+3. **Run the `tfpfgen | Pipeline` workflow** (Actions → tfpfgen | Pipeline →
+   Run workflow). It reads `config.json` and needs nothing typed into the form.
 
    One run does the whole chain and opens one pull request: pin the document,
    generate the SDK, derive the provider block, draft blueprints pruned against
    the real SDK, fold in probe evidence, check the bindings, scaffold the shell,
    generate the provider, then build and unit-test it on the runner.
-3. **Run it again whenever an input changes** — a refreshed document, a newer
+4. **Run it again whenever an input changes** — a refreshed document, a newer
    tfpfgen. The run re-derives everything and proposes the difference. If
    nothing changed, it says so and proposes nothing.
-4. **Turn the probe on when you want live evidence.** Configure the probe
+5. **Turn the probe on when you want live evidence.** Configure the probe
    secrets below, then tick `record_evidence` on a run. A probe job goes first,
    exercises each resource against a sandbox tenant, and hands what it observed
    to the generate job — so the recordings and the provider they change arrive
@@ -51,7 +53,7 @@ express it refuses by name rather than leaving for somebody to patch in.
    The probe is off by default because it is the only part that touches a live
    system, and it is the only job holding the tenant's credentials — a job that
    does not declare a secret cannot leak one.
-5. **Release.** Push a `v*` tag (or dispatch `provider | Terraform Provider
+6. **Release.** Push a `v*` tag (or dispatch `provider | Terraform Provider
    Release`). goreleaser builds linux/darwin/windows on amd64/arm64, with the
    signed checksums and registry manifest the Terraform Registry requires.
 
@@ -84,6 +86,7 @@ document, the recordings, and this repository's own identity.
 
 | Path | Written by | Regenerated |
 |---|---|---|
+| `config.json` | you — the only file you configure; see [CONFIGURING.md](CONFIGURING.md) | never |
 | `openapi/<name>/` | `openapi fetch` — pinned, checksummed snapshots | on refresh |
 | `openapi/<name>/patches/` | you, rarely — evidence-justified corrections where the published document is provably wrong about the live API | never |
 | `recordings/<name>/` | `probe record` — replayable transcripts of live behaviour | per probe run |
