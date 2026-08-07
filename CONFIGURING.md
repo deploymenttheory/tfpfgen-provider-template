@@ -1,6 +1,6 @@
 # Configuring the pipeline
 
-Everything the generator needs to know about your API lives in one committed
+Everything the generator needs to know about this API lives in one committed
 file: **`config.json`** at the repository root. The pipeline reads it on every
 run. Nothing else configures generation — no dispatch form to fill in, no
 settings held in somebody's memory.
@@ -123,8 +123,8 @@ do; the credentials themselves are repository secrets, never config.
   "secrets": { "token": "TFPFGEN_PROBE_BEARER_TOKEN" },
   "namePrefix": "tfpfgen-probe",
   "maxExistingObjects": 25,
-  "accountScopeParam": "",
-  "accountScopeJsonPath": ""
+  "accountScopeParam": "aid",
+  "accountScopeJsonPath": "aid"
 }
 ```
 
@@ -155,7 +155,7 @@ The rest bound what the probe may do:
 |---|---|
 | `namePrefix` | Every object the probe creates is named with this prefix, so anything it leaves behind is identifiable as its own |
 | `maxExistingObjects` | The probe refuses to run if the tenant already holds more than this many objects — the cheapest evidence that a tenant is a sandbox and not production |
-| `accountScopeParam` | The query parameter that scopes requests to one account, if the API has one (`aid` for Jamf Pro and ThousandEyes, for example). Omit when it does not |
+| `accountScopeParam` | The query parameter that scopes requests to one account, if the API has one (`aid` for ThousandEyes). Omit when it does not |
 | `accountScopeJsonPath` | The field in a response carrying that account identifier, used to confirm the probe is talking to the tenant it was pointed at |
 
 ## Making a change
@@ -173,13 +173,23 @@ committing it. Everything declarative is in the file.
 
 ## What is not configured here
 
-- **Credentials.** Repository secrets. The probe always needs
-  `TFPFGEN_PROBE_ENDPOINT`, `TFPFGEN_SANDBOX_EVIDENCE` and
-  `TFPFGEN_ACCOUNT_GROUP_ID`, plus whichever credential secrets its
-  `authMethod` names above. Releases need `GPG_PRIVATE_KEY` and
-  `GPG_PRIVATE_KEY_PASSPHRASE`.
+- **Credentials and where to point the probe.** Repository secrets, every one
+  of them prefixed `TFPFGEN_PROBE_` so the set is visible at a glance:
 
-  `config.json` names secrets; it never holds them.
+  | Secret | Needed when | What to put in it |
+  |---|---|---|
+  | `TFPFGEN_PROBE_API_URL` | always | the sandbox tenant's API base URL, e.g. `https://api.example.com/v1` |
+  | `TFPFGEN_PROBE_SANDBOX_REASON` | always | a sentence, in your own words, saying why this tenant is disposable. At least four words — writing it is the point |
+  | `TFPFGEN_PROBE_ACCOUNT_SCOPE_ID` | only when `probe.accountScopeParam` is set | the account the probe must stay inside |
+  | `TFPFGEN_PROBE_BEARER_TOKEN` | `authMethod: bearerToken` | the API token |
+  | `TFPFGEN_PROBE_CLIENT_ID` and `TFPFGEN_PROBE_CLIENT_SECRET` | `authMethod: clientCredentials` | the credentials to exchange for a token |
+  | `TFPFGEN_PROBE_USERNAME` and `TFPFGEN_PROBE_PASSWORD` | `authMethod: usernamePassword` | the Basic credentials |
+
+  Releases separately need `GPG_PRIVATE_KEY` and `GPG_PRIVATE_KEY_PASSPHRASE`.
+
+  `config.json` names secrets; it never holds them. Rename any of the above in
+  `probe.secrets` if your organisation's secrets are called something else.
+
 - **What the provider looks like.** Which resources exist, what their
   attributes are called, how they are validated: all derived from the API
   document and from recorded evidence, not chosen here.
