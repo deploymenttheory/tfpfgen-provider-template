@@ -63,7 +63,7 @@ express it refuses by name rather than leaving for somebody to patch in.
 |---|---|---|
 | `GPG_PRIVATE_KEY` | release | signs the checksums (registry requirement) |
 | `GPG_PRIVATE_KEY_PASSPHRASE` | release | only if the key has one |
-| `TFPFGEN_PROBE_TOKEN` | probe job | the sandbox credential, when `probe.authMethod` is `bearerToken` (see [CONFIGURING.md](CONFIGURING.md) for the client-credentials and username/password variants) |
+| `TFPFGEN_PROBE_BEARER_TOKEN` | probe job | the sandbox credential, when `probe.authMethod` is `bearerToken` (see [CONFIGURING.md](CONFIGURING.md) for the client-credentials and username/password variants) |
 | `TFPFGEN_PROBE_ENDPOINT` | probe job | the API's base URL |
 | `TFPFGEN_SANDBOX_EVIDENCE` | probe job | a sentence (≥ 4 words) stating why this tenant is disposable |
 | `TFPFGEN_ACCOUNT_GROUP_ID` | probe job | the tenant scope the probe stays inside |

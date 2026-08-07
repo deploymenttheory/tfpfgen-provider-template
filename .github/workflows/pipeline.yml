@@ -132,7 +132,7 @@ jobs:
             echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
             echo "PROBE_AUTH_METHOD=$(jq -r '.probe.authMethod // "bearerToken"' config.json)"
             echo "PROBE_TOKEN_URL=$(jq -r '.probe.tokenUrl // .auth.tokenUrl // empty' config.json)"
-            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_TOKEN"' config.json)"
+            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_BEARER_TOKEN"' config.json)"
             echo "PROBE_SECRET_CLIENT_ID=$(jq -r '.probe.secrets.clientId // "TFPFGEN_PROBE_CLIENT_ID"' config.json)"
             echo "PROBE_SECRET_CLIENT_SECRET=$(jq -r '.probe.secrets.clientSecret // "TFPFGEN_PROBE_CLIENT_SECRET"' config.json)"
             echo "PROBE_SECRET_USERNAME=$(jq -r '.probe.secrets.username // "TFPFGEN_PROBE_USERNAME"' config.json)"
@@ -161,7 +161,7 @@ jobs:
           ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
           EVIDENCE: ${{ secrets.TFPFGEN_SANDBOX_EVIDENCE }}
           AID: ${{ secrets.TFPFGEN_ACCOUNT_GROUP_ID }}
-          TOKEN: ${{ secrets.TFPFGEN_PROBE_TOKEN }}
+          TOKEN: ${{ secrets.TFPFGEN_PROBE_BEARER_TOKEN }}
           CLIENT_ID: ${{ secrets.TFPFGEN_PROBE_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.TFPFGEN_PROBE_CLIENT_SECRET }}
           USERNAME: ${{ secrets.TFPFGEN_PROBE_USERNAME }}
@@ -261,7 +261,7 @@ jobs:
 
       - name: Record
         env:
-          TFPFGEN_PROBE_TOKEN: ${{ secrets.TFPFGEN_PROBE_TOKEN }}
+          TFPFGEN_PROBE_BEARER_TOKEN: ${{ secrets.TFPFGEN_PROBE_BEARER_TOKEN }}
           TFPFGEN_PROBE_ENDPOINT: ${{ secrets.TFPFGEN_PROBE_ENDPOINT }}
           ONLY: ${{ inputs.probe_only_this_resource }}
           FORCE: ${{ inputs.probe_re_record_existing }}
@@ -380,7 +380,7 @@ jobs:
             echo "PROBE_SCOPE_JSONPATH=$(jq -r '.probe.accountScopeJsonPath // empty' config.json)"
             echo "PROBE_AUTH_METHOD=$(jq -r '.probe.authMethod // "bearerToken"' config.json)"
             echo "PROBE_TOKEN_URL=$(jq -r '.probe.tokenUrl // .auth.tokenUrl // empty' config.json)"
-            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_TOKEN"' config.json)"
+            echo "PROBE_SECRET_TOKEN=$(jq -r '.probe.secrets.token // "TFPFGEN_PROBE_BEARER_TOKEN"' config.json)"
             echo "PROBE_SECRET_CLIENT_ID=$(jq -r '.probe.secrets.clientId // "TFPFGEN_PROBE_CLIENT_ID"' config.json)"
             echo "PROBE_SECRET_CLIENT_SECRET=$(jq -r '.probe.secrets.clientSecret // "TFPFGEN_PROBE_CLIENT_SECRET"' config.json)"
             echo "PROBE_SECRET_USERNAME=$(jq -r '.probe.secrets.username // "TFPFGEN_PROBE_USERNAME"' config.json)"
